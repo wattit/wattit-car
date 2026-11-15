@@ -2,6 +2,13 @@
 
 Pleos Connect(Android Automotive) 차량용 전기차 충전 도우미 앱입니다. Kotlin과 Jetpack Compose로 만든 네이티브 앱이며 WebView를 쓰지 않습니다.
 
+## 저장소 구성
+
+- `app/`: 차량 앱(Kotlin, Jetpack Compose). 빌드와 실행 방법은 아래 "빌드"와 "실행" 절에 있습니다.
+- `server/`: 앱이 부르는 서버(Python, FastAPI)입니다. 요금 엔진, 충전 계획 API, 충전소 API가 들어 있습니다. 실행·테스트 방법은 [`server/README.md`](server/README.md), API 명세는 [`server/docs/car-api.md`](server/docs/car-api.md)에 있습니다.
+- `apk/NonamedKernel_wattit_release.apk`: 서명된 release APK. 에뮬레이터에 바로 설치할 수 있습니다.
+- `third_party/pretendard/`: 앱에 넣은 글꼴의 라이선스와 글꼴을 줄이는 스크립트입니다.
+
 ## 기능
 
 ### 충전 계획 화면
@@ -59,13 +66,48 @@ Pleos Vehicle의 배터리 용량 함수(`getEvBatteryCapacity`)는 SDK 소스�
 
 Pleos SDK는 공개 저장소 `https://nexus-playground.pleos.ai/repository/maven-releases/`에서 받습니다(`settings.gradle.kts`).
 
+- 이 저장소에서는 `ai.pleos` 그룹만 받습니다.
+- Gradle 배포본은 공식 SHA-256으로 확인합니다(`gradle/wrapper/gradle-wrapper.properties`).
+
+## 실행
+
+1. Android Studio에서 Pleos Connect 2.1.0 시스템 이미지(API 34)로 에뮬레이터(AVD)를 만들어 실행합니다.
+2. release APK를 설치합니다.
+
+   ```bash
+   adb install -r apk/NonamedKernel_wattit_release.apk
+   ```
+
+3. 앱 목록에서 "와트잇"을 엽니다. 배터리 잔량과 용량은 에뮬레이터의 Virtual Console(Energy)에서 바꿀 수 있습니다(`adb forward tcp:8088 tcp:8088` 후 `http://127.0.0.1:8088/`).
+
+앱은 인터넷으로 서버(기본값: 운영 서버)에 연결합니다. 서버 없이 열면 "서버에 연결하지 못했어요"와 "다시 시도"가 보입니다.
+
 ## 빌드
 
 ```bash
 ./gradlew assembleDebug testDebugUnitTest
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`
+디버그 APK: `app/build/outputs/apk/debug/app-debug.apk`
+
+### release APK
+
+release 서명 키는 저장소 밖에 두고, 경로와 비밀번호를 환경 변수로 넘깁니다.
+
+```bash
+export WATTIT_KEYSTORE_FILE=/path/to/wattit-release.jks
+export WATTIT_KEYSTORE_PASSWORD=...
+export WATTIT_KEY_ALIAS=wattit
+export WATTIT_KEY_PASSWORD=...
+./gradlew assembleRelease
+cp app/build/outputs/apk/release/app-release.apk apk/NonamedKernel_wattit_release.apk
+```
+
+- 환경 변수가 없으면 release APK는 서명되지 않은 채로 만들어지고, debug 빌드에는 영향이 없습니다.
+- release 빌드는 R8로 쓰지 않는 코드만 걷어 냅니다. 이름을 바꾸거나(난독화) 코드를 고치지는(최적화) 않습니다.
+  - Pleos SDK의 클래스는 모두 남깁니다(`app/proguard-rules.pro`).
+  - 끄려면 `-PwattitMinify=false`를 붙입니다.
+- 포함하는 ABI는 `arm64-v8a`(실차, Apple Silicon 에뮬레이터)와 `x86_64`(Intel 에뮬레이터)입니다.
 
 ### 서버 주소 설정
 
@@ -73,6 +115,7 @@ APK: `app/build/outputs/apk/debug/app-debug.apk`
 
 ```bash
 ./gradlew assembleDebug -PwattitApiBaseUrl=https://example.test
+./gradlew assembleRelease -PwattitApiBaseUrl=https://example.test   # release APK도 같습니다
 ```
 
 Android는 기본 설정에서 `http://` 주소를 막으므로 HTTPS 주소를 지정해 주세요.
@@ -91,3 +134,8 @@ Android는 기본 설정에서 `http://` 주소를 막으므로 HTTPS 주소를 
 ## 글꼴
 
 Pretendard(SIL Open Font License 1.1)를 앱에 포함했습니다. 라이선스 전문은 `third_party/pretendard/LICENSE.txt`에 있습니다.
+
+- 앱 크기를 줄이려고, 화면에 쓰는 4개 굵기만 넣었습니다.
+- 굵기마다 KS X 1001 한글 2,350자와 영문·기호만 남겼습니다(굵기당 약 370KB).
+- 이 범위 밖의 글자는 시스템 한글 글꼴로 표시됩니다.
+- 만드는 방법은 `third_party/pretendard/README.md`에 있습니다.
