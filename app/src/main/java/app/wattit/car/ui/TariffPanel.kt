@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.wattit.car.data.HourPrice
@@ -165,7 +166,12 @@ private fun Chart(tariff: TariffState.Ready) {
                             h.hour % 2 == 0 -> "%02d".format(h.hour)
                             else -> ""
                         }
-                        Text(label, style = style(13, FontWeight.Medium, Palette.Muted), modifier = Modifier.width(HourWidth))
+                        // Centered under the hour, where the line's point for that hour is drawn.
+                        Text(
+                            label,
+                            style = style(13, FontWeight.Medium, Palette.Muted).copy(textAlign = TextAlign.Center),
+                            modifier = Modifier.width(HourWidth),
+                        )
                     }
                 }
             }

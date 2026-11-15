@@ -198,7 +198,8 @@ private fun contextLine(plan: PlanState.Ready, state: ScreenState): String {
     } else {
         "출발 시각 기준"
     }
-    return "$departText · 지금 잔량 ${plan.socNow}%"
+    // When no charging is needed the large number is already the state of charge.
+    return if (plan.response.needsCharging) "$departText · 지금 잔량 ${plan.socNow}%" else departText
 }
 
 /** Reservation window as sent ("23:00–06:00"); falls back to the plan's own start and end. */
