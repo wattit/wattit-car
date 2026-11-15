@@ -16,6 +16,8 @@ object Palette {
     val Faint = Color(0xFF8C9498)
     val Navy = Color(0xFF14295A)
     val Teal = Color(0xFF3E8A9A)
+    /** Teal for text: #3E8A9A is too light for text on the canvas. */
+    val TealText = Color(0xFF327686)
     val TealFill = Color(0xFFDCE9EE)
     val BandOther = Color(0xFFB9C0C3)
     val Track = Color(0xFFEDF0F1)
