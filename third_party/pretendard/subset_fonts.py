@@ -34,6 +34,9 @@ def rename(font):
     for key in ("FamilyName", "FullName"):
         if hasattr(top, key):
             setattr(top, key, getattr(top, key).replace(RESERVED, NEW_FAMILY))
+    for fd in getattr(top, "FDArray", []):  # CID-keyed fonts name each FontDict too
+        if hasattr(fd, "FontName"):
+            fd.FontName = fd.FontName.replace(f"{RESERVED}-", f"{NEW_PS}-")
 
 
 hangul = [c for c in codepoints if 0xAC00 <= c <= 0xD7A3]
