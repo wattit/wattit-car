@@ -6,7 +6,7 @@ Pleos Connect(Android Automotive) 차량용 전기차 충전 도우미 앱입니
 
 - `app/`: 차량 앱(Kotlin, Jetpack Compose). 빌드와 실행 방법은 아래 "빌드"와 "실행" 절에 있습니다.
 - `server/`: 앱이 부르는 서버(Python, FastAPI)입니다. 요금 엔진, 충전 계획 API, 충전소 API가 들어 있습니다. 실행·테스트 방법은 [`server/README.md`](server/README.md), API 명세는 [`server/docs/car-api.md`](server/docs/car-api.md)에 있습니다.
-- `apk/NonamedKernel_wattit_release.apk`: 서명된 release APK. 에뮬레이터에 바로 설치할 수 있습니다.
+- `apk/TRIO_wattit_release.apk`: 서명된 release APK. 에뮬레이터에 바로 설치할 수 있습니다.
 - `third_party/pretendard/`: 앱에 넣은 글꼴의 라이선스와 글꼴을 줄이는 스크립트입니다.
 
 ## 기능
@@ -75,7 +75,7 @@ Pleos SDK는 공개 저장소 `https://nexus-playground.pleos.ai/repository/mave
 2. release APK를 설치합니다.
 
    ```bash
-   adb install -r apk/NonamedKernel_wattit_release.apk
+   adb install -r apk/TRIO_wattit_release.apk
    ```
 
 3. 앱 목록에서 "와트잇"을 엽니다. 배터리 잔량과 용량은 에뮬레이터의 Virtual Console(Energy)에서 바꿀 수 있습니다(`adb forward tcp:8088 tcp:8088` 후 `http://127.0.0.1:8088/`).
@@ -100,11 +100,11 @@ export WATTIT_KEYSTORE_PASSWORD=...
 export WATTIT_KEY_ALIAS=wattit
 export WATTIT_KEY_PASSWORD=...
 ./gradlew assembleRelease
-cp app/build/outputs/apk/release/app-release.apk apk/NonamedKernel_wattit_release.apk
+cp app/build/outputs/apk/release/app-release.apk apk/TRIO_wattit_release.apk
 ```
 
 - 환경 변수가 없으면 release APK는 서명되지 않은 채로 만들어지고, debug 빌드에는 영향이 없습니다.
-- release 빌드는 R8로 쓰지 않는 코드만 걷어 냅니다. 이름을 바꾸거나(난독화) 코드를 고치지는(최적화) 않습니다.
+- release 빌드는 R8로 쓰지 않는 코드를 걷어 내고, keep 규칙 밖의 이름을 바꿉니다(난독화). 코드를 고치지는(최적화) 않습니다. Pleos SDK, JNA, Gson은 이름을 그대로 둡니다.
   - Pleos SDK의 클래스는 모두 남깁니다(`app/proguard-rules.pro`).
   - 끄려면 `-PwattitMinify=false`를 붙입니다.
 - 포함하는 ABI는 `arm64-v8a`(실차, Apple Silicon 에뮬레이터)와 `x86_64`(Intel 에뮬레이터)입니다.

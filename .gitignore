@@ -14,5 +14,5 @@ __pycache__/
 .ruff_cache/
 # Built APKs stay out of git, except the one release APK submitted with the repository.
 *.apk
-!apk/NonamedKernel_wattit_release.apk
+!apk/TRIO_wattit_release.apk
 *.env

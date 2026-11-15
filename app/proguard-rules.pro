@@ -1,6 +1,7 @@
-# Release builds only shrink unused code. Names stay as they are and nothing is rewritten, so reflection
-# and IPC inside the Pleos SDK see the same classes as in a debug build.
--dontobfuscate
+# Release builds shrink unused code and rename what is not kept, so library internals do not carry
+# readable names into the APK. Nothing is rewritten (no optimization). The Pleos SDK, JNA and Gson keep
+# their names through the rules below and their own consumer rules, so reflection and IPC still see the
+# same classes. Keep build/outputs/mapping/release/mapping.txt outside the repository to read crash traces.
 -dontoptimize
 
 # Pleos Connect SDK (Vehicle, TextToSpeech, their AIDL, data and security modules). The SDK ships its own
