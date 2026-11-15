@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature
+        android:name="android.hardware.type.automotive"
+        android:required="true" />
+
+    <!-- Plan and tariff requests to the server -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Pleos Vehicle: EV battery state of charge -->
+    <uses-permission android:name="pleos.car.permission.CAR_ENERGY" />
+    <!-- Android Automotive CarPropertyManager: INFO_EV_BATTERY_CAPACITY, INFO_MODEL -->
+    <uses-permission android:name="android.car.permission.CAR_INFO" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="false"
+        android:theme="@style/Theme.Wattit">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
