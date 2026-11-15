@@ -8,6 +8,13 @@ plugins {
 // Server address. Override with `-PwattitApiBaseUrl=https://...` or in ~/.gradle/gradle.properties.
 val apiBaseUrl: String = (findProperty("wattitApiBaseUrl") as String?) ?: "https://kinetic-ev.duckdns.org"
 
+// Release shrinking (R8, shrink only: no obfuscation or optimization). `-PwattitMinify=false` turns it off.
+val minifyRelease: Boolean = (findProperty("wattitMinify") as String?)?.toBooleanStrict() ?: true
+
+// Release signing key lives outside the repository. Without these variables the release build is unsigned
+// and debug builds are unaffected.
+val releaseKeystore: String? = System.getenv("WATTIT_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+
 android {
     namespace = "app.wattit.car"
     compileSdk = 34
@@ -20,11 +27,39 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
+
+        // Real cars run arm64; the Pleos Connect emulator image (API 34) is arm64 or x86_64 depending on the host.
+        // 32-bit and MIPS copies of the SDK's native libraries are left out.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("WATTIT_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("WATTIT_KEY_ALIAS") ?: "wattit"
+                keyPassword = System.getenv("WATTIT_KEY_PASSWORD") ?: System.getenv("WATTIT_KEYSTORE_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = minifyRelease
+            isShrinkResources = minifyRelease
+            proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
+        }
+    }
+
+    // Store native libraries compressed in the APK (the SDK's libuacore is 3.5-4 MB per ABI and compresses to
+    // about half); they are extracted at install time.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 
