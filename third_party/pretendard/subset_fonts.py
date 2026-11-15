@@ -17,6 +17,25 @@ for lead in range(0xB0, 0xC9):  # KS X 1001 Hangul rows (EUC-KR 0xB0A1-0xC8FE)
         except UnicodeDecodeError:
             pass
 
+RESERVED, NEW_FAMILY, NEW_PS = "Pretendard", "Wattit Sans", "WattitSans"
+
+
+def rename(font):
+    """A subset is a Modified Version under the OFL, and "Pretendard" is a Reserved Font Name, so the family,
+    full, unique and PostScript names become "Wattit Sans". Copyright and trademark notices stay as they are."""
+    for record in font["name"].names:
+        if record.nameID in (1, 3, 4, 6, 16, 17, 18, 21, 22):
+            text = str(record)
+            text = text.replace(f"{RESERVED}-", f"{NEW_PS}-") if record.nameID in (3, 6) else text
+            record.string = text.replace(RESERVED, NEW_FAMILY)
+    cff = font["CFF "].cff
+    cff.fontNames = [n.replace(f"{RESERVED}-", f"{NEW_PS}-") for n in cff.fontNames]
+    top = cff.topDictIndex[0]
+    for key in ("FamilyName", "FullName"):
+        if hasattr(top, key):
+            setattr(top, key, getattr(top, key).replace(RESERVED, NEW_FAMILY))
+
+
 hangul = [c for c in codepoints if 0xAC00 <= c <= 0xD7A3]
 print("hangul syllables", len(hangul), "total codepoints", len(codepoints))
 
@@ -31,6 +50,7 @@ for weight in ["Regular", "Medium", "SemiBold", "Bold"]:
     subsetter = subset.Subsetter(options)
     subsetter.populate(unicodes=codepoints)
     subsetter.subset(font)
+    rename(font)
     out = f"{out_dir}/pretendard_{weight.lower()}.otf"
     subset.save_font(font, out, options)
     print(out)

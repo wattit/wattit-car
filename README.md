@@ -138,4 +138,5 @@ Pretendard(SIL Open Font License 1.1)를 앱에 포함했습니다. 라이선스
 - 앱 크기를 줄이려고, 화면에 쓰는 4개 굵기만 넣었습니다.
 - 굵기마다 KS X 1001 한글 2,350자와 영문·기호만 남겼습니다(굵기당 약 370KB).
 - 이 범위 밖의 글자는 시스템 한글 글꼴로 표시됩니다.
+- 글자를 줄인 글꼴은 OFL에서 수정본으로 봅니다. "Pretendard"가 예약 이름이라 글꼴 이름을 Wattit Sans로 바꿨습니다.
 - 만드는 방법은 `third_party/pretendard/README.md`에 있습니다.
