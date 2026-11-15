@@ -148,7 +148,7 @@ Reservation:
 - `place="home"` (집·회사 완속): **시간대**. 지금 바로 충전했을 때와 출발 전 가장 싼 구간의
   차이. 계산과 시각 검사는 `POST /api/car/plan`과 같다 (꽂는 시각 = 서버 현재 시각).
 - `place="public"` (공공 충전기): **결제 방식**. 로밍가·비회원가와 회원가의 차이.
-  한국소비자원 2025-12-17 발표 20개 사업자 평균 단가(`backend/config/public_charging_prices.yaml`)로
+  한국소비자원 2025-12-17 발표 20개 사업자 평균 단가(`server/config/public_charging_prices.yaml`)로
   추정한다. 시간대 계산은 하지 않는다 (공공 급속 기준단가 미확인).
 
 ### 요청 (JSON)

@@ -13,7 +13,7 @@
   서버 계산값이니 앱이 숫자를 다시 만들거나 반올림하지 않는다.
 - **게스트로 쓴다.** 로그인 없이 기기 토큰 하나로 개인 기록(절감, 출발 시각)을 묶는다.
 - 계약 보호: `/api/car/*`와 `/api/chargers*`의 필드 목록(타입, 필수 여부, Literal 값, 범위·길이·개수
-  제약, 기본값)은 `backend/tests/api/snapshots/car_api_contract.json`에 스냅숏으로 있다. 서버가 이것을
+  제약, 기본값)은 `server/tests/api/snapshots/car_api_contract.json`에 스냅숏으로 있다. 서버가 이것을
   바꾸면 테스트가 실패하므로, 앱은 이 파일을 기준으로 맞추면 된다. 스냅숏이 지키지 못하는 것은 4절 끝.
 
 SDK 이름은 Pleos SDK 소스(Vehicle, NaviHelper, navidata, FusedLocation)에서 확인한 것만 적었다.
@@ -227,7 +227,7 @@ normal 권한은 설치 때 부여된다. dangerous 권한은 앱 시작 때 한
 - 스냅숏 테스트가 지키지 못하는 것: 오류 본문(음성 429·501의 `speech`, 422의 `detail` 문장),
   헤더(`X-Status-Note`, `Retry-After`), 음성 밖 API의 오류 코드(OpenAPI(`/docs`)에는 401·429·501이
   음성에만 적혀 있다). 이것들은 위 표와 `car-api.md`의 각 절이 기준이다.
-- 하루 시나리오 테스트(`backend/tests/scenarios/test_car_day.py`)는 한 기기의 하루를 한 가지 순서로만
+- 하루 시나리오 테스트(`server/tests/scenarios/test_car_day.py`)는 한 기기의 하루를 한 가지 순서로만
   돈다. 단계마다 예약·금액이 같은 입력의 `car/plan`과 같은지, 운전자가 말한 시각이 "말한 출발"로
   몇 건 남는지는 보지만, 오류 경로(401·429)와 오프라인 일괄 전송은 각 API 테스트가 맡는다.
 - 계산 API(`car/plan`, `car/leak-check`, `car/briefing`)는 토큰이 틀려도 계산은 그대로 준다
@@ -236,7 +236,7 @@ normal 권한은 설치 때 부여된다. dangerous 권한은 앱 시작 때 한
 
 ## 5. 하루 흐름 예
 
-`backend/tests/scenarios/test_car_day.py`가 아래 순서를 시계를 고정해 끝까지 돌고, 단계마다 숫자가
+`server/tests/scenarios/test_car_day.py`가 아래 순서를 시계를 고정해 끝까지 돌고, 단계마다 숫자가
 같은 입력의 `car/plan`과 맞는지 확인한다.
 
 1. 화 08:00 기기 발급.
