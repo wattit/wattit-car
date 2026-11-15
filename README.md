@@ -104,7 +104,7 @@ cp app/build/outputs/apk/release/app-release.apk apk/NonamedKernel_wattit_releas
 ```
 
 - 환경 변수가 없으면 release APK는 서명되지 않은 채로 만들어지고, debug 빌드에는 영향이 없습니다.
-- release 빌드는 R8로 쓰지 않는 코드만 걷어 냅니다. 이름을 바꾸거나(난독화) 코드를 고치지는(최적화) 않습니다.
+- release 빌드는 R8로 쓰지 않는 코드를 걷어 내고, keep 규칙 밖의 이름을 바꿉니다(난독화). 코드를 고치지는(최적화) 않습니다. Pleos SDK, JNA, Gson은 이름을 그대로 둡니다.
   - Pleos SDK의 클래스는 모두 남깁니다(`app/proguard-rules.pro`).
   - 끄려면 `-PwattitMinify=false`를 붙입니다.
 - 포함하는 ABI는 `arm64-v8a`(실차, Apple Silicon 에뮬레이터)와 `x86_64`(Intel 에뮬레이터)입니다.

@@ -6,7 +6,7 @@ plugins {
 }
 
 // Server address. Override with `-PwattitApiBaseUrl=https://...` or in ~/.gradle/gradle.properties.
-val apiBaseUrl: String = (findProperty("wattitApiBaseUrl") as String?) ?: "https://kinetic-ev.duckdns.org"
+val apiBaseUrl: String = (findProperty("wattitApiBaseUrl") as String?) ?: "https://wattit-13-125-147-86.sslip.io"
 
 // Release shrinking (R8, shrink only: no obfuscation or optimization). `-PwattitMinify=false` turns it off.
 val minifyRelease: Boolean = (findProperty("wattitMinify") as String?)?.toBooleanStrict() ?: true
