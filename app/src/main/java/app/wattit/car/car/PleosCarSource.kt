@@ -5,7 +5,9 @@ import android.car.VehiclePropertyIds
 import android.car.hardware.property.CarPropertyManager
 import android.content.Context
 import ai.pleos.playground.vehicle.Vehicle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
@@ -30,23 +32,27 @@ interface CarSource {
 class PleosCarSource(context: Context) : CarSource {
     private val appContext = context.applicationContext
     private val vehicle = Vehicle(appContext).also { it.initialize() }
+    @Volatile
     private var car: Car? = null
 
     override suspend fun read(): CarReading {
         val soc = readSoc()
-        val properties = propertyManager()
-        val capacity = properties?.let { manager ->
-            runCatching { manager.getFloatProperty(VehiclePropertyIds.INFO_EV_BATTERY_CAPACITY, GLOBAL_AREA) }
-                .getOrNull()
-                ?.takeIf { it.isFinite() && it > 0f }
-                ?.toInt()
+        // CarPropertyManager calls block on IPC and must not run on the main thread.
+        return withContext(Dispatchers.IO) {
+            val properties = propertyManager()
+            val capacity = properties?.let { manager ->
+                runCatching { manager.getFloatProperty(VehiclePropertyIds.INFO_EV_BATTERY_CAPACITY, GLOBAL_AREA) }
+                    .getOrNull()
+                    ?.takeIf { it.isFinite() && it > 0f }
+                    ?.toInt()
+            }
+            val model = properties?.let { manager ->
+                runCatching {
+                    manager.getProperty(String::class.java, VehiclePropertyIds.INFO_MODEL, GLOBAL_AREA)?.value
+                }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            }
+            CarReading(soc, capacity, model)
         }
-        val model = properties?.let { manager ->
-            runCatching {
-                manager.getProperty(String::class.java, VehiclePropertyIds.INFO_MODEL, GLOBAL_AREA)?.value
-            }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-        }
-        return CarReading(soc, capacity, model)
     }
 
     private suspend fun readSoc(): Int? = withTimeoutOrNull(SOC_TIMEOUT_MS) {
