@@ -46,6 +46,8 @@ data class HourPrice(
     val hour: Int,
     val band: String,
     @SerialName("price_per_kwh") val pricePerKwh: Double,
+    /** Spring/fall weekend and holiday daytime discount hours. */
+    val discounted: Boolean = false,
 )
 
 @Serializable

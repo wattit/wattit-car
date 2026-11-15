@@ -87,13 +87,13 @@ fun ChargePlanScreen(state: ScreenState, onRetryPlan: () -> Unit, onRetryTariff:
                     Row(Modifier.fillMaxSize()) {
                         PlanPanel(state, onRetryPlan, sizes, stacked = false, Modifier.weight(0.48f).fillMaxHeight())
                         VerticalLine()
-                        TariffPanel(state.tariff, reservation, footer, onRetryTariff, Modifier.weight(0.52f).fillMaxHeight())
+                        TariffPanel(state.tariff, reservation, footer, state.now, onRetryTariff, Modifier.weight(0.52f).fillMaxHeight())
                     }
                 } else {
                     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                         PlanPanel(state, onRetryPlan, sizes, stacked = true, Modifier.fillMaxWidth())
                         HorizontalLine()
-                        TariffPanel(state.tariff, reservation, footer, onRetryTariff, Modifier.fillMaxWidth().height(StackedChartHeight))
+                        TariffPanel(state.tariff, reservation, footer, state.now, onRetryTariff, Modifier.fillMaxWidth().height(StackedChartHeight))
                     }
                 }
             }
@@ -313,8 +313,10 @@ private fun reservationOf(plan: PlanState): Reservation? = (plan as? PlanState.R
 
 private fun tariffFooter(state: ScreenState): TariffFooter = when (val plan = state.plan) {
     is PlanState.NotNeeded -> {
-        val window = (state.tariff as? TariffState.Ready)?.let { TariffText.lightWindow(it.days.first()) }
-        TariffFooter("다음에 충전할 때도 이 시간이 가장 쌉니다", window ?: "-", Palette.TealText, 30)
+        // Chosen from the server's hourly prices, so "가장 싼" holds on discount days too.
+        val now = state.now
+        val run = (state.tariff as? TariffState.Ready)?.let { t -> now?.let { TariffText.cheapestAhead(t.days, it) } }
+        TariffFooter("가장 싼 시간", run?.label ?: "-", Palette.TealText, 30, run?.let { "${TariffText.won(it.price)}/kWh" })
     }
     is PlanState.Ready -> TariffFooter(
         "바로 충전 대비 절감",

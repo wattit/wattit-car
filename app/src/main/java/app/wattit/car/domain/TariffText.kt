@@ -57,6 +57,75 @@ object TariffText {
     fun highest(hours: List<HourPrice>): Double? = hours.maxOfOrNull { it.pricePerKwh }
 
     /**
+     * Legend for the light-load band of the first chart day: "경부하 22:00–08:00 · ₩112/kWh".
+     * The price is the light-load hours' own price (discount hours left out). "최저" is added only when
+     * that price really is the lowest on the whole chart; a spring/fall weekend discount can be cheaper.
+     */
+    fun lightLegend(days: List<TimelineResponse>): String? {
+        val first = days.firstOrNull() ?: return null
+        val window = lightWindow(first) ?: return null
+        val lightPrice = first.hours.sortedBy { it.hour }.firstOrNull { it.band == "light" && !it.discounted }?.pricePerKwh
+            ?: return "경부하 $window"
+        val chartLowest = days.flatMap { it.hours }.minOf { it.pricePerKwh }
+        val lowest = if (lightPrice <= chartLowest) "최저 " else ""
+        return "경부하 $window · $lowest${won(lightPrice)}/kWh"
+    }
+
+    /**
+     * Legend entries for discount hours (spring/fall weekend and holiday daytime): "할인 11:00–14:00 · ₩70.6/kWh".
+     * One entry when both chart days have the same window and price, else one per day marked 오늘/내일.
+     */
+    fun discountLegends(days: List<TimelineResponse>): List<String> {
+        val perDay = days.take(2).map { day ->
+            val hours = day.hours.sortedBy { it.hour }.filter { it.discounted }
+            if (hours.isEmpty()) {
+                null
+            } else {
+                val start = hours.first().hour
+                val end = hours.last().hour + 1
+                "%02d:00–%02d:00 · %s/kWh".format(start, end % 24, won(hours.minOf { it.pricePerKwh }))
+            }
+        }
+        val present = perDay.filterNotNull()
+        return when {
+            present.isEmpty() -> emptyList()
+            present.toSet().size == 1 && present.size == perDay.size -> listOf("할인 ${present.first()}")
+            else -> perDay.mapIndexedNotNull { i, entry -> entry?.let { "${if (i == 0) "오늘" else "내일"} 할인 $it" } }
+        }
+    }
+
+    /** The cheapest hours ahead, chosen from the server's hourly prices. [label] never contains the price. */
+    data class CheapestRun(val label: String, val price: Double)
+
+    /**
+     * The cheapest run of hours in the next 24 hours from [now] on a chart that starts at the first day's
+     * 00:00 KST: the lowest `price_per_kwh` in that window, then the first stretch of hours at that price
+     * (followed past the window while the price holds). "지금–08:00" when it is under way, "내일 11:00–14:00"
+     * when it starts on the second day, "종일" when the whole window has that price.
+     */
+    fun cheapestAhead(days: List<TimelineResponse>, now: ZonedDateTime): CheapestRun? {
+        val first = days.firstOrNull() ?: return null
+        val origin = runCatching { LocalDate.parse(first.day).atStartOfDay(KST) }.getOrNull() ?: return null
+        val prices = days.flatMap { day -> day.hours.sortedBy { it.hour }.map { it.pricePerKwh } }
+        val nowHour = Duration.between(origin, now.withZoneSameInstant(KST)).toHours().toInt()
+        if (nowHour < 0 || nowHour >= prices.size) return null
+        val windowEnd = minOf(nowHour + 24, prices.size)
+        val window = nowHour until windowEnd
+        val min = window.minOf { prices[it] }
+        if (window.all { prices[it] == min }) return CheapestRun("종일", min)
+        val start = window.first { prices[it] == min }
+        var end = start
+        while (end < prices.size && prices[end] == min) end++
+        val endText = "%02d:00".format(end % 24)
+        val label = when {
+            start == nowHour -> "지금–$endText"
+            start >= 24 -> "내일 %02d:00–$endText".format(start % 24)
+            else -> "%02d:00–$endText".format(start)
+        }
+        return CheapestRun(label, min)
+    }
+
+    /**
      * Where the reservation sits on a chart that starts at [firstDay] 00:00 KST and runs [hours] hours,
      * in hours from the chart start, clipped to the chart. Null when it falls outside the chart or
      * the times cannot be read. Uses the server's `start_at`/`end_at` as sent.

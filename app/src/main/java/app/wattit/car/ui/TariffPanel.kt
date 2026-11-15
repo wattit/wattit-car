@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -37,9 +39,13 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.wattit.car.data.HourPrice
 import app.wattit.car.data.Reservation
 import app.wattit.car.domain.KST
@@ -49,14 +55,18 @@ import java.time.ZonedDateTime
 
 private val HourWidth = 46.dp
 
-/** The line under the chart: savings for a plan, the cheapest window when no charging is needed. */
-data class TariffFooter(val label: String, val value: String, val color: Color, val size: Int)
+/**
+ * The line under the chart: savings for a plan, the cheapest hours when no charging is needed.
+ * [suffix] is drawn smaller after the value (the cheapest hours' price).
+ */
+data class TariffFooter(val label: String, val value: String, val color: Color, val size: Int, val suffix: String? = null)
 
 @Composable
 fun TariffPanel(
     tariff: TariffState,
     reservation: Reservation?,
     footer: TariffFooter,
+    now: ZonedDateTime?,
     onRetry: () -> Unit,
     modifier: Modifier,
 ) {
@@ -69,7 +79,7 @@ fun TariffPanel(
             when (tariff) {
                 TariffState.Loading -> CenterNote("요금표를 불러오는 중이에요.", null)
                 TariffState.Failed -> CenterNote("요금표를 불러오지 못했어요.", onRetry)
-                is TariffState.Ready -> Chart(tariff, reservation)
+                is TariffState.Ready -> Chart(tariff, reservation, now)
             }
         }
         HorizontalLine()
@@ -80,7 +90,16 @@ fun TariffPanel(
         ) {
             Text(footer.label, style = text(19, color = Palette.Muted), modifier = Modifier.weight(1f, fill = false))
             Spacer(Modifier.width(16.dp))
-            Text(footer.value, style = text(footer.size, FontWeight.Bold, footer.color))
+            Text(
+                buildAnnotatedString {
+                    append(footer.value)
+                    footer.suffix?.let {
+                        withStyle(SpanStyle(fontSize = 19.sp, fontWeight = FontWeight.Medium, color = Palette.Muted)) { append(" · $it") }
+                    }
+                },
+                style = text(footer.size, FontWeight.Bold, footer.color),
+                maxLines = 1,
+            )
         }
     }
 }
@@ -102,11 +121,12 @@ private fun CenterNote(message: String, onRetry: (() -> Unit)?) {
 }
 
 @Composable
-private fun Chart(tariff: TariffState.Ready, reservation: Reservation?) {
+private fun Chart(tariff: TariffState.Ready, reservation: Reservation?, now: ZonedDateTime?) {
     val hours: List<HourPrice> = tariff.days.flatMap { it.hours.sortedBy { h -> h.hour } }
     val lowest = TariffText.lowest(hours) ?: return
     val highest = TariffText.highest(hours) ?: return
-    val window = TariffText.lightWindow(tariff.days.first())
+    val lightLegend = TariffText.lightLegend(tariff.days)
+    val discountLegends = TariffText.discountLegends(tariff.days)
     val span = reservation?.let { TariffText.reservationSpan(tariff.days.first().day, it.startAt, it.endAt, hours.size) }
     val scroll = rememberScrollState()
     val density = LocalDensity.current
@@ -114,14 +134,16 @@ private fun Chart(tariff: TariffState.Ready, reservation: Reservation?) {
 
     // Open on the reservation (with six hours before it, as in the mock), otherwise on the current hour.
     LaunchedEffect(tariff, span) {
-        val firstHour = span?.let { it.start - 6f } ?: (ZonedDateTime.now(KST).hour - 1f)
-        scroll.scrollTo(with(density) { (HourWidth * firstHour.coerceAtLeast(0f)).roundToPx() })
+        val firstHour = span?.let { it.start - 6f } ?: ((now ?: ZonedDateTime.now(KST)).withZoneSameInstant(KST).hour - 1f)
+        // Half a cell earlier, so the label on the first boundary is not cut at the left edge.
+        scroll.scrollTo(with(density) { (HourWidth * (firstHour - 0.5f).coerceAtLeast(0f)).roundToPx() })
     }
 
     val description = buildString {
         append("시간대별 요금 그래프, 오늘과 내일 48시간. ")
         append("최저 ${TariffText.won(lowest)}, 최고 ${TariffText.won(highest)}.")
-        window?.let { append(" 경부하 $it.") }
+        lightLegend?.let { append(" $it.") }
+        discountLegends.forEach { append(" $it.") }
         reservation?.let { append(" 예약 ${it.startHhmm}부터 ${it.endHhmm}까지.") }
     }
 
@@ -181,7 +203,7 @@ private fun Chart(tariff: TariffState.Ready, reservation: Reservation?) {
         }
         Axis(hours, span, chartWidth, scroll)
         ScrollIndicator(scroll.value, scroll.maxValue)
-        Legend(window, lowest, reservation)
+        Legend(lightLegend, discountLegends, reservation)
     }
 }
 
@@ -189,76 +211,77 @@ private fun Chart(tariff: TariffState.Ready, reservation: Reservation?) {
 @Composable
 private fun Axis(hours: List<HourPrice>, span: ClosedFloatingPointRange<Float>?, chartWidth: androidx.compose.ui.unit.Dp, scroll: ScrollState) {
     Column(Modifier.fillMaxWidth().horizontalScroll(scroll)) {
-        Row(Modifier.width(chartWidth).padding(top = 12.dp)) {
-            hours.forEach { h ->
-                Box(
-                    Modifier
-                        .width(HourWidth)
-                        .height(10.dp)
-                        .background(if (h.band == "light") Palette.Teal else Palette.BandOther),
+        // One canvas for both bars: a Row of 46 dp boxes rounds each box to whole pixels and drifts
+        // from the chart (about 10 px by 22:00 at 200 DPI), so cells are placed by the same x as the chart.
+        Canvas(Modifier.width(chartWidth).padding(top = 12.dp).height(24.dp)) {
+            val step = size.width / hours.size
+            val band = 10.dp.toPx()
+            hours.forEachIndexed { i, h ->
+                drawRect(
+                    color = if (h.band == "light" || h.discounted) Palette.Teal else Palette.BandOther,
+                    topLeft = Offset(step * i, 0f),
+                    size = Size(step + 0.5f, band),
                 )
             }
-        }
-        BoxWithConstraints(Modifier.width(chartWidth).padding(top = 8.dp).height(6.dp).background(Palette.Track)) {
+            val barTop = band + 8.dp.toPx()
+            val barHeight = 6.dp.toPx()
+            drawRect(Palette.Track, topLeft = Offset(0f, barTop), size = Size(size.width, barHeight))
             if (span != null) {
-                val start = HourWidth * span.start
-                Box(
-                    Modifier
-                        .offset(x = start)
-                        .width(HourWidth * (span.endInclusive - span.start))
-                        .fillMaxHeight()
-                        .background(Palette.Navy),
+                drawRect(
+                    Palette.Navy,
+                    topLeft = Offset(step * span.start, barTop),
+                    size = Size(step * (span.endInclusive - span.start), barHeight),
                 )
             }
         }
-        Row(Modifier.width(chartWidth).padding(top = 10.dp)) {
+        // Labels sit on hour boundaries (hour h starts at x = h cells), where the band, reservation bar
+        // and shading start too. The first label is left-aligned so it is not cut at the chart edge.
+        Box(Modifier.width(chartWidth).padding(top = 10.dp)) {
             hours.forEachIndexed { i, h ->
                 val label = when {
                     i == 24 -> "내일"
                     h.hour % 2 == 0 -> "%02d".format(h.hour)
-                    else -> ""
+                    else -> null
                 }
-                // Centered under the hour, where the line's point for that hour is drawn.
-                Text(
-                    label,
-                    style = text(16, FontWeight.SemiBold, Palette.Muted).copy(textAlign = TextAlign.Center),
-                    modifier = Modifier.width(HourWidth),
-                )
+                if (label != null) {
+                    Text(
+                        label,
+                        style = text(16, FontWeight.SemiBold, Palette.Muted)
+                            .copy(textAlign = if (i == 0) TextAlign.Start else TextAlign.Center),
+                        modifier = Modifier
+                            .offset(x = if (i == 0) 0.dp else HourWidth * i - HourWidth / 2)
+                            .width(HourWidth),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun Legend(light: String?, discounts: List<String>, reservation: Reservation?) {
+    FlowRow(
+        Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(28.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        light?.let { LegendItem(it, Palette.TealText) { Box(Modifier.size(16.dp).background(Palette.Teal)) } }
+        discounts.forEach { LegendItem(it, Palette.TealText) { Box(Modifier.size(16.dp).background(Palette.Teal)) } }
+        reservation?.let {
+            LegendItem("예약 ${it.startHhmm}–${it.endHhmm}", Palette.Navy) {
+                Box(Modifier.width(22.dp).height(6.dp).background(Palette.Navy))
             }
         }
     }
 }
 
 @Composable
-private fun Legend(window: String?, lowest: Double, reservation: Reservation?) {
-    val light = @Composable {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(16.dp).background(Palette.Teal))
-            Spacer(Modifier.width(12.dp))
-            val windowText = window?.let { "경부하 $it · " } ?: ""
-            Text("${windowText}최저 ${TariffText.won(lowest)}/kWh", style = text(19, FontWeight.Medium, Palette.TealText), maxLines = 1)
-        }
-    }
-    val reserved = @Composable { r: Reservation ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(22.dp).height(6.dp).background(Palette.Navy))
-            Spacer(Modifier.width(12.dp))
-            Text("예약 ${r.startHhmm}–${r.endHhmm}", style = text(19, FontWeight.Medium, Palette.Navy), maxLines = 1)
-        }
-    }
-    BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 16.dp)) {
-        // Both items need about 580 dp on one line; on a narrow (portrait) panel they stack.
-        if (maxWidth >= 580.dp) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                light()
-                reservation?.let { reserved(it) }
-            }
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                light()
-                reservation?.let { reserved(it) }
-            }
-        }
+private fun LegendItem(label: String, color: Color, swatch: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        swatch()
+        Spacer(Modifier.width(12.dp))
+        Text(label, style = text(19, FontWeight.Medium, color), maxLines = 1)
     }
 }
 

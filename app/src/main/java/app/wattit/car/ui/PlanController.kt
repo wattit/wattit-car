@@ -31,6 +31,8 @@ data class ScreenState(
     val car: CarReading? = null,
     val departAt: ZonedDateTime? = null,
     val today: java.time.LocalDate? = null,
+    /** When the plan was last asked for; the "cheapest hours ahead" line counts from here. */
+    val now: ZonedDateTime? = null,
     val plan: PlanState = PlanState.Loading,
     val tariff: TariffState = TariffState.Loading,
 )
@@ -64,7 +66,7 @@ class PlanController(
         planJob = scope.launch {
             val now = clock().withZoneSameInstant(KST)
             val depart = Departure.next(now)
-            _state.value = _state.value.copy(plan = PlanState.Loading, departAt = depart, today = now.toLocalDate())
+            _state.value = _state.value.copy(plan = PlanState.Loading, departAt = depart, today = now.toLocalDate(), now = now)
 
             val reading = car.read()
             _state.value = _state.value.copy(car = reading)

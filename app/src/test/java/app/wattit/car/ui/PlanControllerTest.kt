@@ -70,6 +70,7 @@ class PlanControllerTest {
             controller.refreshPlan()
             advanceUntilIdle()
             assertEquals(PlanState.NotNeeded(soc, 80), controller.state.value.plan)
+            assertEquals(now, controller.state.value.now)
             assertTrue("soc $soc sent a request", requests.isEmpty())
             assertTrue(speaker.said.isEmpty())
         }
