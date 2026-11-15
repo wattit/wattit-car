@@ -1,0 +1,146 @@
+import textwrap
+
+import pytest
+
+from evcharge.domain.errors import TariffConfigError
+from evcharge.domain.tariff import Tariff
+
+
+def write_yaml(tmp_path, body: str):
+    path = tmp_path / "tariff.yaml"
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
+    return path
+
+
+def test_unverified_items_reports_dotted_paths(tmp_path):
+    path = write_yaml(
+        tmp_path,
+        """
+        version: "test-1"
+        vat_rate:
+          value: 0.1
+          source: "부가가치세법"
+          status: verified
+        adders:
+          climate_env_per_kwh:
+            value: 0.0
+            source: "미확보"
+            status: unverified
+          fuel_adjustment_per_kwh:
+            value: 0.0
+            source: "미확보"
+            status: derived
+        """,
+    )
+
+    tariff = Tariff.load(path)
+
+    assert tariff.unverified_items() == [
+        "adders.climate_env_per_kwh",
+        "adders.fuel_adjustment_per_kwh",
+    ]
+
+
+def test_verified_items_are_excluded(tmp_path):
+    path = write_yaml(
+        tmp_path,
+        """
+        version: "test-1"
+        vat_rate:
+          value: 0.1
+          source: "부가가치세법"
+          status: verified
+        """,
+    )
+
+    assert Tariff.load(path).unverified_items() == []
+
+
+def test_unknown_status_is_rejected_at_load_time(tmp_path):
+    path = write_yaml(
+        tmp_path,
+        """
+        version: "test-1"
+        vat_rate:
+          value: 0.1
+          source: "부가가치세법"
+          status: probably_fine
+        """,
+    )
+
+    with pytest.raises(TariffConfigError) as excinfo:
+        Tariff.load(path)
+
+    assert "probably_fine" in str(excinfo.value)
+    assert "vat_rate" in str(excinfo.value)
+
+
+def test_version_is_exposed(tmp_path):
+    path = write_yaml(
+        tmp_path,
+        """
+        version: "2026.1-draft"
+        vat_rate:
+          value: 0.1
+          source: "부가가치세법"
+          status: verified
+        """,
+    )
+
+    assert Tariff.load(path).version == "2026.1-draft"
+
+
+def test_real_config_unverified_set_is_exactly_what_we_expect():
+    """실제 설정의 미확인 항목 집합을 통째로 고정한다.
+
+    항목 하나가 verified로 바뀌거나 반대로 풀리면 이 테스트가 깨진다 — 요금
+    설정의 상태 변경은 항상 의도적이어야 하고, 조용히 일어나면 안 된다.
+    (/health와 /api/recommend가 이 목록을 그대로 내보내므로 화면의 "요금 일부
+    확인 중" 안내가 여기에 달려 있다.)
+
+    기후에너지환경부 보도자료 2026-04-14(붙임 3)로 시간대·전력량요금·주말 할인이
+    전부 verified가 됐다. 남은 둘은 그 문서가 말하지 않는 값이다:
+    공공 급속 기준단가는 충전사업자가 각자 정하고, 주말 할인의 일몰 연도는
+    어디에도 적혀 있지 않다(기능 명세서만 2030년이라고 한다).
+    """
+    from evcharge.settings import get_settings
+
+    unverified = Tariff.load(get_settings().tariff_path).unverified_items()
+
+    assert set(unverified) == {
+        "public_fast.base_price_per_kwh",
+        "weekend_discount_sunset",
+    }
+
+
+def test_real_config_marks_the_kepco_sourced_items_verified():
+    """공식 요금표에서 옮긴 항목은 미확인 목록에 없어야 한다.
+
+    누가 값을 잠정치로 되돌리면서 status만 verified로 남겨두는 실수는 위
+    테스트가 못 잡는다. 반대로 status를 되돌리면 이 테스트가 잡는다.
+    """
+    from evcharge.settings import get_settings
+
+    unverified = Tariff.load(get_settings().tariff_path).unverified_items()
+
+    for kepco_sourced in [
+        "time_bands",
+        "seasons",
+        "energy_charge.self_low",
+        "energy_charge.self_high",
+        "adders.climate_env_per_kwh",
+        "adders.fuel_adjustment_per_kwh",
+        "vat_rate",
+        "power_fund_rate",
+    ]:
+        assert kepco_sourced not in unverified, f"{kepco_sourced}가 미확인으로 남아있다"
+
+
+def test_power_fund_rate_is_the_current_statutory_rate_not_the_pdf_value():
+    """전력산업기반기금은 2025-07부터 2.7%다. 요금표 PDF(2023-11-09)의 3.7%는
+    두 번 인하되기 전 값이라, PDF를 다시 옮겨 적다 되돌리는 실수를 막는다."""
+    from evcharge.settings import get_settings
+
+    tariff = Tariff.load(get_settings().tariff_path)
+
+    assert tariff.get("power_fund_rate") == pytest.approx(0.027)

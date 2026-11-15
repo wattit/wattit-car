@@ -1,0 +1,937 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from itertools import pairwise
+from typing import Annotated, Literal
+
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    EmailStr,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
+
+from ..domain.pricing import KST
+from ..domain.route import route_length_m
+
+Mode = Literal["self_low", "self_high", "public_fast"]
+Band = Literal["light", "middle", "peak"]
+Season = Literal["summer", "spring_fall", "winter"]
+
+
+# 요청 시각이 받을 수 있는 연도. 계산 범위를 좁히려는 것이 아니라 KST 변환과 시각 덧셈이
+# datetime 범위(1~9999년)를 넘어 OverflowError(본문 없는 500)가 나는 것을 막는 상한·하한이다.
+# 9999-12-31T23:59+00:00은 KST로 옮기면 10000년이 되고, 0001년은 계산 중에 0년 아래로 내려간다.
+MIN_REQUEST_YEAR = 1970
+MAX_REQUEST_YEAR = 9998
+
+
+def to_kst(value: datetime | None) -> datetime | None:
+    """요청 시각을 KST aware로. 타임존 없는 입력은 한국 시간으로 읽는다(API 명세서 1장).
+
+    연도는 보낸 그대로와 KST로 옮긴 뒤를 모두 본다. 변환 전 검사는 변환 자체의 넘침을
+    막고, 변환 후 검사는 서비스가 이 값으로 요청 모델을 다시 만들 때(car/leak-check →
+    car/plan) 같은 검사에 걸려 처리되지 않은 ValidationError(500)가 나는 것을 막는다.
+    범위 밖이면 ValueError라 pydantic이 422로 바꾼다 — OverflowError는 pydantic이 검증
+    오류로 바꾸지 않아 500이 된다.
+    """
+    if value is None:
+        return None
+    _check_year(value)
+    converted = value.replace(tzinfo=KST) if value.tzinfo is None else value.astimezone(KST)
+    _check_year(converted)
+    return converted
+
+
+def _check_year(value: datetime) -> None:
+    if not MIN_REQUEST_YEAR <= value.year <= MAX_REQUEST_YEAR:
+        raise ValueError(
+            f"시각은 {MIN_REQUEST_YEAR}년부터 {MAX_REQUEST_YEAR}년 사이여야 합니다."
+        )
+
+
+def _to_kst_isoformat(value: datetime) -> str:
+    """DB/도메인에서 어떤 tzinfo로 오든, 응답 시각은 항상 +09:00으로 (API 명세서 1장)."""
+    return value.astimezone(KST).isoformat()
+
+
+# A-2: KST 직렬화 공용 처리. datetime 필드를 가진 응답 스키마마다 개별
+# field_serializer를 따로 붙이던 것(UserOut.created_at, SavedPlanOut.created_at이
+# 서로 모르는 채 같은 버그를 두 번 고쳤다)을 타입 별칭 하나로 대체한다.
+# 필드 타입을 KstDatetime으로 선언하기만 하면 자동으로 +09:00이 보장되고,
+# `KstDatetime | None`으로도 그대로 조합된다 (None은 이 직렬화기를 타지 않고
+# 그대로 null로 나간다).
+KstDatetime = Annotated[datetime, PlainSerializer(_to_kst_isoformat, return_type=str)]
+
+
+def _normalize_email(value: object) -> object:
+    """앞뒤 공백을 지우고 소문자로 통일한다.
+
+    이메일 로컬파트는 RFC상 대소문자를 구분할 수 있지만, 이 서비스는
+    "같은 사람이 두 번 가입되는" 문제를 막는 게 우선이라 통째로 소문자로
+    다룬다(I-3). 가입(중복 확인·저장)과 로그인(조회) 양쪽이 이 타입을 함께
+    써야 한다 — 한쪽만 정규화하면 기존 계정에 로그인이 안 된다.
+
+    BeforeValidator라 타입 검증보다 먼저 돈다. 문자열이 아니면(null·숫자·배열)
+    손대지 않고 그대로 넘겨 EmailStr이 422로 거절하게 한다 — 여기서 .strip()을
+    부르면 AttributeError로 500이 난다.
+    """
+    if not isinstance(value, str):
+        return value
+    return value.strip().lower()
+
+
+# I-3: 이메일 형식 검증(F-11) + 소문자 정규화를 한 타입으로 묶는다.
+# BeforeValidator가 EmailStr 검증보다 먼저 돌아 "정규화 → 형식 검증" 순서를
+# 보장한다 — 거꾸로 하면 "Mixed@Example.COM "처럼 정규화 후에야 유효해지는
+# 입력을 정규화 전 형식으로 먼저 튕겨낼 수 있다. max_length=320은
+# infra/models.py의 users.email 컬럼(varchar(320))과 맞춘다(I-2).
+NormalizedEmail = Annotated[
+    EmailStr, BeforeValidator(_normalize_email), Field(max_length=320)
+]
+
+
+class HealthResponse(BaseModel):
+    status: str
+    unverified_tariff_items: list[str]
+
+
+class HourPriceOut(BaseModel):
+    hour: int
+    band: Band
+    discounted: bool
+    price_per_kwh: float
+
+
+class TimelineResponse(BaseModel):
+    day: date
+    mode: Mode
+    season: Season
+    is_holiday: bool
+    hours: list[HourPriceOut]
+
+
+# I-4: 탐색 구간 상한. 인증 없이 도달 가능한 POST /api/recommend가 구간에
+# 상한이 없어 리뷰어 실측으로 9년 구간(스키마가 연도 9999도 그대로 받는다)
+# = 12.6초/265MB/후보 315,533개를 냈다 — curl 한 줄로 워커를 수 분간 묶고
+# OOM까지 갈 수 있는 DoS였다.
+#
+# 도메인(planner)이 아니라 여기(스키마)에 두는 이유: 이 상한은 "이 계산이
+# 수학적으로 틀렸다"는 도메인 규칙이 아니라 "이 값을 HTTP로 노출하는 서비스를
+# 무제한 계산으로부터 보호한다"는 API 경계의 정책이다. 도메인은 HTTP도,
+# 인증 여부도, 무엇이 "정상적인 사용"인지도 모른다 — 9년 구간도 수학적으로는
+# 정확히 계산해낸다(그냥 느릴 뿐). 반대로 soc_target/soc_now 순서나
+# deadline/earliest_start 순서 같은, "입력 자체의 앞뒤가 맞는지"는 같은
+# _check_ranges에서 이미 스키마가 보고 있다 — 도메인(ChargeRequest)은 그런
+# 정합성을 스스로 검증하지 않고 받은 그대로 계산한다. 이 상한도 같은 성격의
+# "입력이 서비스가 감당할 범위인지" 검사라 같은 자리에 둔다.
+#
+# 값(14일) 근거: 기능 명세 시나리오 A(퇴근 후 귀가 → 다음날 출근 전)와 주말
+# 낮 구간이 실제 용례의 전부다 — 며칠을 넘는 "계획"은 이 서비스가 답하려는
+# 질문이 아니다. 그래도 여행 중 숙소에 며칠 머무는 것 같은 정당한 장기 사용을
+# 막지 않도록 넉넉히 14일로 잡았다. 리뷰어 실측 기준 90일 구간(0.35초/8,573
+# 후보)에도 크게 못 미쳐 부하 걱정 없이 여유가 있다.
+MAX_REQUEST_SPAN = timedelta(days=14)
+
+
+# 숫자 입력의 계산 가능 범위. gt=0만으로는 "Infinity"·"NaN"(JSON 확장 표기와
+# 문자열 모두 pydantic이 float로 받아 준다)과 1e300 같은 값이 통과해서, 충전 시간
+# 0초·비용 0원짜리 200이나 timedelta 오버플로 500이 났다. 상한은 "실제로 있는
+# 값 + 넉넉한 여유"다: 승용 전기차 배터리는 100kWh대, 대형 버스도 수백 kWh이고,
+# 가장 빠른 충전기가 1MW급이다. 공공 급속 단가는 kWh당 수백 원대다.
+MAX_BATTERY_KWH = 1000
+MAX_CHARGER_KW = 1000
+MAX_PRICE_PER_KWH = 10_000
+
+
+class RecommendRequest(BaseModel):
+    battery_kwh: float | None = Field(
+        default=None, gt=0, le=MAX_BATTERY_KWH, allow_inf_nan=False
+    )
+    soc_now: float = Field(ge=0, lt=100, allow_inf_nan=False)
+    soc_target: float = Field(gt=0, le=100, allow_inf_nan=False)
+    charger_kw: float | None = Field(default=None, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    earliest_start: datetime
+    deadline: datetime
+    mode: Mode = "self_low"
+    public_base_price: float | None = Field(
+        default=None, gt=0, le=MAX_PRICE_PER_KWH, allow_inf_nan=False
+    )
+    efficiency: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
+    vehicle_id: str | None = None
+
+    @field_validator("earliest_start", "deadline")
+    @classmethod
+    def _normalize_to_kst(cls, value: datetime) -> datetime:
+        """타임존 없는 입력은 한국 시간으로 읽고, 있는 입력은 KST로 옮긴다.
+
+        내부 계산이 전부 KST aware라는 전제를 입구에서 세운다 (API 명세서 1장).
+        """
+        return to_kst(value)
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> RecommendRequest:
+        if self.soc_target <= self.soc_now:
+            raise ValueError("soc_target은 soc_now보다 커야 합니다.")
+        if self.deadline <= self.earliest_start:
+            raise ValueError("deadline은 earliest_start보다 뒤여야 합니다.")
+        if self.deadline - self.earliest_start > MAX_REQUEST_SPAN:
+            raise ValueError(
+                f"earliest_start와 deadline 사이는 {MAX_REQUEST_SPAN.days}일을 "
+                "넘을 수 없습니다."
+            )
+        return self
+
+
+class ChargePlanOut(BaseModel):
+    # 도메인이 이미 KST aware datetime을 넘기므로 astimezone(KST)는 사실상
+    # no-op이지만, 공용 KstDatetime을 그대로 써서 "응답의 datetime은 항상
+    # +09:00" 규칙을 여기서도 따로 기억하지 않게 한다.
+    start: KstDatetime
+    end: KstDatetime
+    energy_kwh: float
+    cost_won: int
+    discounted_kwh: float
+
+
+class RecommendResponse(BaseModel):
+    best: ChargePlanOut
+    baseline_now: ChargePlanOut
+    savings_won: int
+    candidates_checked: int
+    assumptions: list[str]
+    unverified_tariff_items: list[str]
+
+
+# ── 아래는 아직 구현하지 않은 엔드포인트의 계약 (스텁) ────────────────────
+
+
+class SignupRequest(BaseModel):
+    # NormalizedEmail이 형식 검증(EmailStr) + 소문자 정규화 + 길이 제한을
+    # 한 번에 한다(I-3, I-2). nickname의 max_length는 infra/models.py의
+    # users.nickname(varchar(50))과 맞춘다(I-2) — 여기서 막지 않으면 길이
+    # 초과 입력이 그대로 DB까지 내려가 DataError(→ errors.py의 2차 안전망)가
+    # 되는데, 그건 500을 422로 바꿔줄 뿐 진짜 1차 방어선은 아니다.
+    email: NormalizedEmail
+    password: str = Field(min_length=8)
+    nickname: str | None = Field(default=None, max_length=50)
+
+
+class LoginRequest(BaseModel):
+    # 가입 때와 같은 정규화를 거쳐야 한다(I-3) — 한쪽만 정규화하면
+    # "Mixed@Example.COM"으로 가입한 사람이 "mixed@example.com"으로 로그인할
+    # 때 다른 문자열로 조회되어 실패한다.
+    email: NormalizedEmail
+    password: str
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str
+
+
+class UserOut(BaseModel):
+    id: str
+    email: str
+    nickname: str | None = None
+    created_at: KstDatetime | None = None
+
+
+class VehicleIn(BaseModel):
+    # vehicles.name은 varchar(100)(I-2) — 컬럼과 어긋나지 않게 맞춘다.
+    name: str = Field(max_length=100)
+    battery_kwh: float = Field(gt=0, le=MAX_BATTERY_KWH, allow_inf_nan=False)
+    charger_kw: float = Field(gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    mode: Mode = "self_low"
+    is_default: bool = False
+
+
+class VehicleOut(VehicleIn):
+    id: str
+
+
+class VehicleUpdate(BaseModel):
+    """PATCH 전용(C-2): 보낸 필드만 반영하는 부분 갱신.
+
+    ``VehicleIn``을 그대로 재사용하면 ``is_default``·``mode``에 기본값이 있어서,
+    예를 들어 이름만 바꾸려고 ``is_default``를 빼고 보내면 그 기본값(False)이
+    실려서 기존 기본 차량이 조용히 해제됐다. 전 필드를 optional로 두고
+    라우터가 ``exclude_unset=True``로 실제로 실린 필드만 골라 반영한다.
+    """
+
+    name: str | None = Field(default=None, max_length=100)
+    battery_kwh: float | None = Field(
+        default=None, gt=0, le=MAX_BATTERY_KWH, allow_inf_nan=False
+    )
+    charger_kw: float | None = Field(default=None, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    mode: Mode | None = None
+    is_default: bool | None = None
+
+
+class ChargerOut(BaseModel):
+    charger_id: str
+    type: str
+    capacity_kw: float
+    status: str
+    status_updated_at: KstDatetime | None = None
+
+
+class StationBase(BaseModel):
+    """F-07(주변 충전소)과 F-14(즐겨찾기 목록)가 실제로 공유하는 것만 (C-1)."""
+
+    station_id: str
+    is_favorite: bool | None = None
+
+
+class StationOut(StationBase):
+    """F-07 주변 충전소 조회 응답. 캐시(charger_cache)가 항상 채워져 있는
+    경로라 이 필드들은 전부 필수다 — F-14가 캐시 미적중을 표현하려고 예전에
+    전부 optional로 완화했던 것을 원래 계약으로 되돌린다(C-1)."""
+
+    name: str
+    address: str
+    lat: float
+    lng: float
+    distance_m: int
+    operator: str
+    available_hours: str
+    chargers: list[ChargerOut] = Field(default_factory=list)
+    # 상태 신선도 (BE-10): 이 충전소 상태를 수집한 시각, 그로부터 지난 분(내림), 20분 초과 여부
+    synced_at: KstDatetime
+    status_age_min: int
+    stale: bool
+
+
+class ChargerFreshnessOut(BaseModel):
+    """``GET /api/chargers/freshness``. 운영 확인용 집계(수집된 충전소, 좌표 있는 행)."""
+
+    latest_synced_at: KstDatetime | None
+    oldest_synced_at: KstDatetime | None
+    station_count: int
+    stale_count: int
+
+
+class FavoriteStationOut(StationBase):
+    """F-14 즐겨찾기 목록 응답. charger_cache에 아직 없는 station_id도
+    즐겨찾기 자체는 station_id만으로 유효하게 성립하므로, 캐시 유래 필드는
+    전부 optional이다 — 캐시 미적중이면 빈 문자열/0이 아니라 None(JSON null)이
+    나간다. F-07이 구현되어 캐시가 채워지면 값이 실린다(C-1)."""
+
+    name: str | None = None
+    address: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    distance_m: int | None = None
+    operator: str | None = None
+    available_hours: str | None = None
+    # []가 아니라 None이다 — []는 "충전기가 0대인 충전소",
+    # None은 "아직 캐시에서 못 불러왔다"로 프론트가 다르게 표시한다.
+    chargers: list[ChargerOut] | None = None
+
+
+class SavedPlanOut(BaseModel):
+    id: str
+    created_at: KstDatetime
+    request: RecommendRequest
+    result: RecommendResponse
+    tariff_version: str
+    # 저장 당시 차량 이름 스냅샷(3번 수정). 직접 입력이면 null — 빈 문자열이
+    # 아니다. 프론트가 ``vehicle_name ?? 조건폴백``으로 분기한다.
+    vehicle_name: str | None = None
+    # 충전 시작 시각(= result.best.start, 4번 수정). 최상위에 올려 두면
+    # 프론트가 result를 파고들지 않고 목록의 날짜를 표시할 수 있다.
+    # 월 필터와 목록 정렬의 기준이기도 하다.
+    charge_start: KstDatetime
+
+
+class SavedPlanPage(BaseModel):
+    items: list[SavedPlanOut]
+    next_cursor: str | None = None
+
+
+class PlanSummary(BaseModel):
+    month: str
+    count: int
+    total_savings_won: int
+
+
+class SolarHour(BaseModel):
+    """F-09 시간별 예측.
+
+    ``predicted_mwh``가 optional인 이유는 ``api/solar_service.py`` 머리말에
+    자세히 적었다. 요약하면: 물리 모델이 내놓는 것은 단위면적당 일사량이고,
+    MWh로 바꾸려면 지역 태양광 설비용량(전력거래소 자료)이 필요한데 지금
+    없다. 없는 자료로 숫자를 지어내는 대신 null로 비우고, 실제로 계산되는
+    값(``ghi_wm2``·``output_index``)을 함께 내보낸다.
+    """
+
+    hour: int
+    # 구름·강수를 반영한 수평면 전일사량. 이 모델의 실제 출력이다.
+    ghi_wm2: float
+    # 같은 시각의 맑은날 값. 구름이 얼마나 깎았는지 화면에서 바로 보인다.
+    clear_sky_ghi_wm2: float
+    # STC(1000 W/m²) 대비 0~1. 요금 차트에 겹쳐 그릴 때 쓰는 값이다.
+    output_index: float
+    # 설비용량이 설정됐을 때만 채워진다. 기본은 null.
+    predicted_mwh: float | None = None
+    # 기상청 원본 코드. 감쇠가 맞는지 사람이 되짚을 수 있게 그대로 싣는다.
+    sky: str
+    pty: str
+
+
+class SolarForecast(BaseModel):
+    region: str
+    day: date
+    # 물리 모델이므로 "계산식의 버전"이다 (domain/solar.py의 MODEL_VERSION).
+    model_version: str
+    hours: list[SolarHour]
+    # 어느 격자·어느 발표를 썼는지. 한 격자가 시도 전체를 대신한다는 사실을
+    # 응답이 숨기지 않게 한다.
+    grid_nx: int
+    grid_ny: int
+    base_date: str
+    base_time: str
+    installed_capacity_mw: float | None = None
+    capacity_source: str | None = None
+    # RecommendResponse.assumptions와 같은 역할 — 이 값을 어떤 전제로 냈는지.
+    assumptions: list[str] = []
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[dict] | None = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    recommendation: RecommendResponse | None = None
+    missing_fields: list[str] = []
+
+
+# ── 차량 앱 (Pleos Connect) ─────────────────────────────────────────────
+# 계약: docs/car-api.md. 차량 앱은 로그인 없이(게스트) 쓴다.
+
+
+MIN_BATTERY_CAPACITY_WH = 1000
+# 전비(km/kWh) 하한. 실제 전기차는 1을 넘는다(겨울 고속 주행 대형차도 2 안팎). gt=0이면
+# 5e-324 같은 값이 나눗셈에서 OverflowError(500)를 낸다. 경로 위 충전소·음성 context·목표
+# 충전량이 같은 하한을 쓴다.
+MIN_EFFICIENCY_KM_PER_KWH = 0.5
+
+
+class CarPlanRequest(BaseModel):
+    """``POST /api/car/plan`` 요청. 차량이 아는 값으로 충전 계획을 묻는다.
+
+    ``soc_target <= soc_now``는 오류가 아니다 — "충전 필요 없음" 응답으로
+    답하므로 ``RecommendRequest``와 달리 여기서 막지 않는다. 시각의 앞뒤 검사는
+    ``plug_in_at``이 빠졌을 때 서버 현재 시각이 들어가야 해서 계산 서비스
+    (``car_plan_service``)에서 한다.
+    """
+
+    soc_now: float = Field(ge=0, lt=100, allow_inf_nan=False)
+    # Pleos Vehicle SDK getEvBatteryCapacity가 Wh로 준다. 서버가 kWh로 바꾼다.
+    # 하한 1,000Wh(1kWh): 그보다 작은 값은 실제 차에서 오지 않고, 5e-324처럼 아주
+    # 작은 값은 충전 시간이 0이 되어 500이 나거나 "22:00 시작, 22:00 종료" 같은
+    # 예약을 만든다.
+    battery_capacity_wh: float = Field(
+        ge=MIN_BATTERY_CAPACITY_WH, le=MAX_BATTERY_KWH * 1000, allow_inf_nan=False
+    )
+    soc_target: float = Field(default=80, gt=0, le=100, allow_inf_nan=False)
+    charger_kw: float = Field(default=7.0, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    plug_in_at: datetime | None = None
+    depart_at: datetime
+    mode: Mode = "self_low"
+
+    @field_validator("plug_in_at", "depart_at")
+    @classmethod
+    def _normalize_to_kst(cls, value: datetime | None) -> datetime | None:
+        """``RecommendRequest``와 같은 규칙: 오프셋이 없으면 KST로 읽는다."""
+        return to_kst(value)
+
+
+class ReservationOut(BaseModel):
+    """차량 기본 예약 충전에 넣을 값. 시작은 꽂는 시각 이후, 종료는 분 단위 올림."""
+
+    start_at: KstDatetime
+    end_at: KstDatetime
+    start_hhmm: str
+    end_hhmm: str
+
+
+class CarPlanResponse(BaseModel):
+    needs_charging: bool
+    plan: ChargePlanOut | None = None
+    baseline_now: ChargePlanOut | None = None
+    savings_won: int | None = None
+    reservation: ReservationOut | None = None
+    # TTS가 그대로 읽는 문장. 숫자는 전부 위 계산값이나 요청 값에서 온다.
+    speech: str
+    assumptions: list[str]
+    unverified_tariff_items: list[str]
+    # 기기 토큰과 함께 와서 대기 절감 기록을 만들었을 때만 채운다 (BE-5). 아니면 null.
+    saving_id: str | None = None
+
+
+class CarLeakCheckRequest(BaseModel):
+    """``POST /api/car/leak-check`` 요청. 계약: docs/car-api.md.
+
+    ``place``에 따라 쓰는 필드가 다르다. home은 ``depart_at``·``mode``를, public은
+    ``payment``·``charger_speed``를 쓰고 다른 쪽 필드는 무시한다. public에서
+    ``payment``·``charger_speed``가 빠졌는지는 서비스(``car_leak_service``)가 보고
+    필드 위치를 담은 422를 낸다.
+    """
+
+    place: Literal["home", "public"] = "home"
+    soc_now: float = Field(ge=0, lt=100, allow_inf_nan=False)
+    battery_capacity_wh: float = Field(
+        ge=MIN_BATTERY_CAPACITY_WH, le=MAX_BATTERY_KWH * 1000, allow_inf_nan=False
+    )
+    soc_target: float = Field(default=80, gt=0, le=100, allow_inf_nan=False)
+    charger_kw: float = Field(default=7.0, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    depart_at: datetime | None = None
+    mode: Mode = "self_low"
+    payment: Literal["member", "roaming", "nonmember"] | None = None
+    charger_speed: Literal["slow", "fast"] | None = None
+
+    @field_validator("depart_at")
+    @classmethod
+    def _normalize_to_kst(cls, value: datetime | None) -> datetime | None:
+        return to_kst(value)
+
+
+class CarLeakCheckResponse(BaseModel):
+    leaking: bool
+    leak_won: int
+    cause: Literal["time", "payment"] | None = None
+    energy_kwh: float
+    # home에서 돈이 샐 때만: 가장 싼 구간과 차량 예약 충전 값 (car/plan과 같은 모양)
+    plan: ChargePlanOut | None = None
+    reservation: ReservationOut | None = None
+    # public일 때만: 지금 결제 방식과 회원가의 사업자 평균 단가(원/kWh)
+    unit_price_now: float | None = None
+    unit_price_member: float | None = None
+    speech: str
+    assumptions: list[str]
+    # 기기 토큰과 함께 와서 대기 절감 기록을 만들었을 때만 채운다 (BE-5). 아니면 null.
+    saving_id: str | None = None
+
+
+class CarDeviceOut(BaseModel):
+    """``POST /api/car/devices`` 201. 토큰은 이 응답에서 한 번만 보인다."""
+
+    device_id: str
+    device_token: str
+
+
+class CarSavingOut(BaseModel):
+    """절감 기록 한 건. 금액은 서버 계산값이다(실측 요금 아님)."""
+
+    saving_id: str
+    cause: Literal["time", "payment"]
+    savings_won: int
+    energy_kwh: float
+    source: Literal["plan", "leak_check", "briefing"]
+    created_at: KstDatetime
+    confirmed_at: KstDatetime | None = None
+
+
+class CarSavingsByCause(BaseModel):
+    time_won: int
+    payment_won: int
+
+
+class CarSavingsSummary(BaseModel):
+    """``GET /api/car/savings/summary``. 확정된 기록만 더한다 (KST 달·해, 확정 시각 기준)."""
+
+    month: str
+    month_won: int
+    month_count: int
+    year: int
+    year_won: int
+    year_count: int
+    total_won: int
+    # 전체 기간(total_won)을 원인별로 나눈 값
+    by_cause: CarSavingsByCause
+    speech: str
+    note: str
+
+
+# ---------------------------------------------------------------------------
+# 와트잇 음성 대화 (BE-3) — 계약: docs/car-api.md
+# ---------------------------------------------------------------------------
+
+ROUTE_POINTS_MAX = 50
+
+
+class LatLng(BaseModel):
+    # 극 근처에서는 경도 1도의 길이가 0에 가까워 평면 근사가 무너진다. 국내 서비스라
+    # 위도 ±85도 밖은 받지 않는다.
+    lat: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    lng: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
+class AddWaypointAction(BaseModel):
+    """내비 경유지로 넣을 충전소 (BE-7, 음성 대화의 동작으로도 쓴다)."""
+
+    type: Literal["add_waypoint"] = "add_waypoint"
+    station_id: str
+    name: str
+    lat: float
+    lng: float
+
+
+VOICE_TEXT_MAX = 500
+VOICE_HISTORY_MAX = 6
+
+
+class CarVoiceContext(BaseModel):
+    """앱이 Pleos SDK로 읽어 보내는 차량 상태. 도구의 차량 값은 전부 여기서 온다."""
+
+    soc_now: float = Field(ge=0, le=100, allow_inf_nan=False)
+    battery_capacity_wh: float = Field(
+        ge=MIN_BATTERY_CAPACITY_WH, le=MAX_BATTERY_KWH * 1000, allow_inf_nan=False
+    )
+    lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    lng: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    # NaviHelper의 목적지 도착 예상 잔량(%)
+    arrival_soc: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    # NaviHelper의 목적지 도착 예정 시각. 충전 계획의 꽂는 시각으로 쓴다. 지금부터 24시간
+    # 안이어야 한다(라우터가 서버 시각으로 검사). 이미 지났으면 지금으로 본다.
+    arrival_at: datetime | None = None
+    charger_kw: float = Field(default=7.0, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    charging: bool | None = None
+    place: Literal["home", "public"] | None = None
+    # 내비 목적지와 남은 거리(BE-7 경로 위 충전소 찾기 도구). 목적지가 없으면 그 도구는
+    # 오류 결과를 준다. 남은 거리가 있어야 충전소별 잔량을 추정한다.
+    destination: LatLng | None = None
+    remain_distance_m: float | None = Field(default=None, gt=0, le=3_000_000, allow_inf_nan=False)
+    # 내비 경유지(남은 것, 순서대로). 없으면 현재 위치에서 목적지까지 직선 근사다.
+    route_points: list[LatLng] = Field(default_factory=list, max_length=ROUTE_POINTS_MAX)
+    # Vehicle SDK 충전 후 평균 전비(km/kWh). 경로 위 충전소 잔량 추정에 쓴다.
+    efficiency_km_per_kwh: float | None = Field(
+        default=None, ge=MIN_EFFICIENCY_KM_PER_KWH, le=20, allow_inf_nan=False
+    )
+
+    @field_validator("arrival_at")
+    @classmethod
+    def _arrival_in_kst(cls, value: datetime | None) -> datetime | None:
+        return to_kst(value)
+
+    @model_validator(mode="after")
+    def _lat_lng_together(self) -> CarVoiceContext:
+        if (self.lat is None) != (self.lng is None):
+            raise ValueError("lat과 lng는 함께 보내야 합니다.")
+        return self
+
+
+class CarVoiceTurn(BaseModel):
+    role: Literal["driver", "wattit"]
+    text: str = Field(min_length=1, max_length=VOICE_TEXT_MAX)
+
+
+class CarVoiceRequest(BaseModel):
+    """``POST /api/car/voice``. ``text``는 ``trigger``가 있을 때만 생략할 수 있다."""
+
+    text: str | None = Field(default=None, min_length=1, max_length=VOICE_TEXT_MAX)
+    trigger: Literal["arrival_briefing"] | None = None
+    history: list[CarVoiceTurn] = Field(default_factory=list, max_length=VOICE_HISTORY_MAX)
+    context: CarVoiceContext
+
+    @field_validator("text")
+    @classmethod
+    def _not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("text가 비어 있습니다.")
+        return value
+
+    @model_validator(mode="after")
+    def _text_or_trigger(self) -> CarVoiceRequest:
+        if self.text is None and self.trigger is None:
+            raise ValueError("text는 trigger가 없으면 필요합니다.")
+        return self
+
+
+class SetReservationAction(BaseModel):
+    """차량 기본 예약 충전에 넣을 값을 화면에 보여 준다(앱이 충전을 켜고 끄지 않는다)."""
+
+    type: Literal["set_reservation"] = "set_reservation"
+    start_hhmm: str
+    end_hhmm: str
+
+
+class NavigateAction(BaseModel):
+    type: Literal["navigate"] = "navigate"
+    station_id: str
+    name: str
+    lat: float
+    lng: float
+
+
+class AskAction(BaseModel):
+    """앱이 TTS로 읽은 뒤 바로 마이크를 열어 답을 받는다."""
+
+    type: Literal["ask"] = "ask"
+    question: str
+
+
+CarVoiceAction = Annotated[
+    SetReservationAction | NavigateAction | AskAction | AddWaypointAction,
+    Field(discriminator="type"),
+]
+
+
+class CarVoiceResponse(BaseModel):
+    speech: str
+    actions: list[CarVoiceAction]
+    # Claude의 문장을 버리고 서버 문장으로 대신했으면 true
+    fallback: bool
+    # plan_charge·leak_check 도구가 대기 절감 기록을 만들었으면 (BE-5)
+    saving_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# 와트잇 경로 위 충전소 찾기 (BE-7) — 계약: docs/car-api.md
+# ---------------------------------------------------------------------------
+
+# 경로 근사(꺾은선)의 최대 길이. 국내 장거리(약 500km)를 넉넉히 덮으면서, 아주 긴
+# 경로로 DB 후보를 한꺼번에 끌어오는 계산을 막는다.
+MAX_ROUTE_M = 1_000_000
+
+
+class CarRouteChargersRequest(BaseModel):
+    """``POST /api/car/chargers/along-route``. 경로는 origin → route_points → destination 꺾은선."""
+
+    origin: LatLng
+    destination: LatLng
+    route_points: list[LatLng] = Field(default_factory=list, max_length=ROUTE_POINTS_MAX)
+    soc_now: float = Field(ge=0, le=100, allow_inf_nan=False)
+    # 내비 도착 예상 잔량(%)과 남은 거리(m). 둘 다 있어야 충전소별 잔량을 추정한다.
+    arrival_soc: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    remain_distance_m: float | None = Field(
+        default=None, gt=0, le=MAX_ROUTE_M * 3, allow_inf_nan=False
+    )
+    min_kw: float = Field(default=50, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    corridor_m: int = Field(default=3000, ge=500, le=10_000)
+    reserve_soc: float = Field(default=15, ge=0, le=100, allow_inf_nan=False)
+    # Vehicle SDK의 충전 후 평균 전비(getSinceChargeEvEfficiency, km/kWh)와 배터리 용량(Wh).
+    # 도착 예상 잔량이나 남은 거리가 없을 때 이 둘로 잔량을 추정한다.
+    efficiency_km_per_kwh: float | None = Field(
+        default=None, ge=MIN_EFFICIENCY_KM_PER_KWH, le=20, allow_inf_nan=False
+    )
+    battery_capacity_wh: float | None = Field(
+        default=None, ge=MIN_BATTERY_CAPACITY_WH, le=MAX_BATTERY_KWH * 1000, allow_inf_nan=False
+    )
+
+    def points(self) -> list[tuple[float, float]]:
+        return [
+            (point.lat, point.lng)
+            for point in [self.origin, *self.route_points, self.destination]
+        ]
+
+    @model_validator(mode="after")
+    def _route_is_computable(self) -> CarRouteChargersRequest:
+        points = self.points()
+        for a, b in pairwise(points):
+            if abs(a[1] - b[1]) > 180:
+                raise ValueError("경로가 날짜변경선을 지나면 계산할 수 없습니다.")
+        if route_length_m(points) > MAX_ROUTE_M:
+            raise ValueError(f"경로 길이는 {MAX_ROUTE_M // 1000:,}km를 넘을 수 없습니다.")
+        return self
+
+
+class RouteChargerOut(BaseModel):
+    station_id: str
+    # 공공 API 이름을 40자로 자른 것
+    name: str
+    lat: float
+    lng: float
+    # 출발(origin)부터 경로 근사를 따라간 거리, 경로에서 벗어난 거리 (m, 반올림)
+    along_m: int
+    offset_m: int
+    # 현재 위치에서 그 충전소까지 가는 거리 추정(m). along_m에 도로 비율(남은 거리 ÷
+    # 꺾은선 길이, 남은 거리가 없으면 1)을 곱하고 offset_m을 더한다. 문장과 잔량 추정이
+    # 같은 값을 쓴다.
+    distance_m: int
+    # 지금 충전대기이면서 min_kw 이상인 충전기 수
+    available_count: int
+    max_kw: float | None
+    # 잔량 추정 (soc_now, arrival_soc, remain_distance_m가 다 있을 때만)
+    est_soc: float | None = None
+    reachable: bool | None = None
+    # 0으로 자르기 전 추정 잔량이 0 이하: 이 충전소까지 가기 전에 배터리가 바닥날 수 있다.
+    # 추정하지 않았으면 null
+    runs_out: bool | None = None
+    # 상태 신선도 (BE-10). GET /api/chargers와 같은 값. 60분 넘은 상태는 여기 오지 않는다.
+    synced_at: KstDatetime
+    status_age_min: int
+    stale: bool
+
+
+class CarRouteChargersResponse(BaseModel):
+    # arrival_soc < reserve_soc. arrival_soc가 없으면 null
+    need_charge: bool | None
+    chargers: list[RouteChargerOut]
+    speech: str
+    # 추천 충전소를 경유지로 넣거나, 추천 충전소까지 못 갈 수 있으면 운전자에게 묻는다
+    actions: list[Annotated[AddWaypointAction | AskAction, Field(discriminator="type")]]
+    assumptions: list[str]
+    coverage_note: str | None = None
+    # 경로 근사(꺾은선) 길이 (m)
+    route_m: int
+
+
+# ---------------------------------------------------------------------------
+# 와트잇 출발 시각 학습 (BE-8) — 계약: docs/car-api.md
+# ---------------------------------------------------------------------------
+
+
+class CarDepartureIn(BaseModel):
+    """``POST /api/car/departures``. 앱이 기어가 P에서 벗어난 첫 시각(집 출발)을 보낸다."""
+
+    departed_at: datetime
+    # 이 API로는 관찰값만 받는다. 운전자가 말한 출발(stated)은 서버가 계산 요청에서 남긴다.
+    source: Literal["observed"] = "observed"
+
+    @field_validator("departed_at")
+    @classmethod
+    def _departed_in_kst(cls, value: datetime) -> datetime:
+        return to_kst(value)  # type: ignore[return-value]
+
+
+class CarDepartureOut(BaseModel):
+    departure_id: str
+    departed_at: KstDatetime
+    source: Literal["observed", "stated"]
+    # 같은 기기 30분 안의 기록과 합쳐졌으면 true(새 행을 만들지 않음, 상태 200)
+    merged: bool
+
+
+class CarDeparturesDeleted(BaseModel):
+    deleted: int
+
+
+class CarDepartureSuggestion(BaseModel):
+    """``GET /api/car/departures/suggest``. 제안이 없으면 시각·신뢰도가 null이다."""
+
+    date: date
+    suggested_depart_at: KstDatetime | None
+    confidence: Literal["high", "low"] | None
+    # 제안에 쓴 기록 수(제안이 없으면 같은 날 종류의 기록 수)
+    basis_count: int
+    day_type: Literal["weekday", "weekend_holiday"]
+    speech: str
+
+
+# ── 시동 ON 브리핑 (BE-9) ───────────────────────────────────────────────────
+
+
+# ── 목표 충전량 추천 (BE-11) ─────────────────────────────────────────────
+
+# 다음 이동 거리 상한(km). 경로 위 충전소 찾기의 전체 경로 상한(1,000km)의 세 배로, 남은 거리
+# 상한(remain_distance_m)과 같다. 그보다 먼 이동은 계산해도 "가는 길에 충전"으로 같다.
+MAX_NEXT_TRIP_KM = 3_000
+
+ChargeTargetReason = Literal["unknown", "daily", "long_trip", "insufficient"]
+
+
+class CarChargeTargetRequest(BaseModel):
+    """몇 %까지 채우면 되는지. 공개 계산 API다(기기 토큰 없음, DB 없음)."""
+
+    battery_capacity_wh: float = Field(
+        ge=MIN_BATTERY_CAPACITY_WH, le=MAX_BATTERY_KWH * 1000, allow_inf_nan=False
+    )
+    # Vehicle SDK getSinceChargeEvEfficiency(충전 후 평균 전비, km/kWh)
+    efficiency_km_per_kwh: float | None = Field(
+        default=None, ge=MIN_EFFICIENCY_KM_PER_KWH, le=20, allow_inf_nan=False
+    )
+    # 다음 이동 거리(km): 내비 목적지 남은 거리나 운전자가 말한 거리
+    next_trip_km: float | None = Field(
+        default=None, gt=0, le=MAX_NEXT_TRIP_KM, allow_inf_nan=False
+    )
+    soc_now: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+
+
+class CarChargeTargetResponse(BaseModel):
+    # 차 설정의 충전 한도나 계획(BE-1)의 soc_target에 넣을 값. 평소 목표~100, 5% 단위
+    soc_target: int
+    # unknown: 거리나 전비를 몰라 평소 목표 / daily: 계산해 보니 평소 목표로 충분 /
+    # long_trip: 다음 이동 때문에 올림 /
+    # insufficient: 100%로도 필요 잔량 + 여유를 못 채움
+    reason: ChargeTargetReason
+    # 다음 이동에 드는 잔량(%, 소수 첫째 자리). 거리나 전비가 없으면 null. 100을 넘을 수 있다.
+    needed_soc: float | None
+    # 100%로도 모자라 가는 길에 충전해야 함(경로 위 충전소 찾기로 이어진다)
+    needs_charge_on_route: bool
+    speech: str
+    assumptions: list[str]
+
+
+class CarBriefingRequest(BaseModel):
+    """``POST /api/car/briefing``. 시동 ON(또는 앱 시작) 때 한 번 부른다.
+
+    ``mode``는 집 충전(자가소비용) 두 가지만 받는다. "오늘 밤 충전" 예약은 집 충전기
+    이야기이고, 공공 급속은 단가가 없으면 계산할 수 없다(422)라 시동 브리핑을 막는다.
+    ``place``는 받아 두기만 한다(지금 계산에 쓰지 않음, docs/car-api.md).
+    """
+
+    soc_now: float = Field(ge=0, le=100, allow_inf_nan=False)
+    battery_capacity_wh: float = Field(
+        ge=MIN_BATTERY_CAPACITY_WH, le=MAX_BATTERY_KWH * 1000, allow_inf_nan=False
+    )
+    charger_kw: float = Field(default=7.0, gt=0, le=MAX_CHARGER_KW, allow_inf_nan=False)
+    mode: Literal["self_low", "self_high"] = "self_low"
+    place: Literal["home", "public"] | None = None
+
+
+class BriefingWindow(BaseModel):
+    start_at: KstDatetime
+    end_at: KstDatetime
+
+
+class BriefingPrice(BaseModel):
+    band: Band
+    band_label: Literal["경부하", "중간부하", "최대부하"]
+    price_per_kwh: float
+    # 지금이 주말·공휴일 할인 시간인지
+    discounted: bool
+    # 오늘 안에서 지금보다 kWh당 단가가 싸지는 첫 시각. 없으면 null
+    next_cheaper_at: KstDatetime | None
+    next_cheaper_price_per_kwh: float | None
+    # 오늘 주말·공휴일 할인 구간(봄·가을 토·일·공휴일 11~14시). 없으면 null
+    discount_window: BriefingWindow | None
+
+
+class BriefingTonight(BaseModel):
+    needs_charging: bool
+    soc_now: float
+    # 이 값보다 낮으면 충전 권장 (CAR_BRIEFING_LOW_SOC)
+    low_soc: float
+    # 충전 권장일 때만: 계획에 쓴 출발 시각과 그 근거(평소 출발 high 제안 / 오전 8시 가정)
+    depart_at: KstDatetime | None = None
+    depart_basis: Literal["usual", "default"] | None = None
+    reservation: ReservationOut | None = None
+    savings_won: int | None = None
+    energy_kwh: float | None = None
+
+
+class BriefingSavings(BaseModel):
+    month: str
+    month_won: int
+    year: int
+    year_won: int
+
+
+class CarBriefingResponse(BaseModel):
+    price: BriefingPrice
+    tonight: BriefingTonight
+    # 기기 토큰이 있고 이번 달 확정 절감이 0보다 클 때만
+    savings: BriefingSavings | None = None
+    # TTS가 읽는 최대 3문장. 숫자는 전부 위 계산값에서 온다.
+    speech: str
+    actions: list[SetReservationAction]
+    # 기기 토큰과 함께 와서 대기 절감 기록을 만들었거나 재사용했을 때만
+    saving_id: str | None = None
+    assumptions: list[str]
+    unverified_tariff_items: list[str]
