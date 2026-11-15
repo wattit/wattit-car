@@ -17,6 +17,7 @@ interface Speaker {
  */
 class PleosSpeaker(context: Context) : Speaker {
     private val tts = TextToSpeech(context.applicationContext, Mode.ON_DEVICE)
+    private val lock = Any()
     private var ready = false
     private var pending: String? = null
 
@@ -24,20 +25,26 @@ class PleosSpeaker(context: Context) : Speaker {
         runCatching {
             tts.initialize(object : OnInitializeListener {
                 override fun onSuccess() {
-                    ready = true
-                    pending?.let { say(it) }
-                    pending = null
+                    val text = synchronized(lock) {
+                        ready = true
+                        pending.also { pending = null }
+                    }
+                    text?.let { say(it) }
                 }
 
                 override fun onFailure(error: ErrorType) {
-                    pending = null
+                    synchronized(lock) { pending = null }
                 }
             })
         }
     }
 
     override fun speak(text: String) {
-        if (ready) say(text) else pending = text
+        val now = synchronized(lock) {
+            if (!ready) pending = text
+            ready
+        }
+        if (now) say(text)
     }
 
     private fun say(text: String) {
