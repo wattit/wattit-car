@@ -59,6 +59,18 @@ class TariffLegendTest {
     }
 
     @Test
+    fun aRunReachingTheChartEndHasNoEndTime() {
+        // 2026-11-21 Sat (winter): middle 08-22 at 190.4, light otherwise at 136.8; 11-22 Sun all light at 136.8.
+        // The light load runs from Saturday 22:00 past the chart's end (Monday 08:00), so no "00:00" end.
+        val satSun = listOf(day("2026-11-21"), day("2026-11-22"))
+        val run = TariffText.cheapestAhead(satSun, at("2026-11-21T09:00:00"))!!
+        assertEquals("22:00부터", run.label)
+        assertEquals(136.8, run.price, 0.0)
+        // From Saturday 23:00 every hour of the next 24 has that price.
+        assertEquals("종일", TariffText.cheapestAhead(satSun, at("2026-11-21T23:00:00"))!!.label)
+    }
+
+    @Test
     fun aFlatWindowIsAllDay() {
         val flat = ApiJson.parseTimeline(
             """{"day":"2026-11-15","season":"winter","hours":[""" +

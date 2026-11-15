@@ -101,7 +101,8 @@ object TariffText {
      * The cheapest run of hours in the next 24 hours from [now] on a chart that starts at the first day's
      * 00:00 KST: the lowest `price_per_kwh` in that window, then the first stretch of hours at that price
      * (followed past the window while the price holds). "지금–08:00" when it is under way, "내일 11:00–14:00"
-     * when it starts on the second day, "종일" when the whole window has that price.
+     * when it starts on the second day, "22:00부터" when it runs to the end of the chart (its end is not
+     * known), "종일" when the whole window has that price.
      */
     fun cheapestAhead(days: List<TimelineResponse>, now: ZonedDateTime): CheapestRun? {
         val first = days.firstOrNull() ?: return null
@@ -116,12 +117,15 @@ object TariffText {
         val start = window.first { prices[it] == min }
         var end = start
         while (end < prices.size && prices[end] == min) end++
+        // A run that reaches the end of the chart may go on past it (Sunday, holiday), so its end is unknown.
+        val reachesChartEnd = end == prices.size
         val endText = "%02d:00".format(end % 24)
-        val label = when {
-            start == nowHour -> "지금–$endText"
-            start >= 24 -> "내일 %02d:00–$endText".format(start % 24)
-            else -> "%02d:00–$endText".format(start)
+        val startText = when {
+            start == nowHour -> "지금"
+            start >= 24 -> "내일 %02d:00".format(start % 24)
+            else -> "%02d:00".format(start)
         }
+        val label = if (reachesChartEnd) "${startText}부터" else "$startText–$endText"
         return CheapestRun(label, min)
     }
 
