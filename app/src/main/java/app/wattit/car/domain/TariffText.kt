@@ -4,6 +4,9 @@ import app.wattit.car.data.HourPrice
 import app.wattit.car.data.TimelineResponse
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
+import java.time.Duration
+import java.time.LocalDate
+import java.time.ZonedDateTime
 import java.util.Locale
 
 /** Labels for the tariff chart. Only describes the server's hourly prices; computes no fee. */
@@ -52,4 +55,19 @@ object TariffText {
     fun lowest(hours: List<HourPrice>): Double? = hours.minOfOrNull { it.pricePerKwh }
 
     fun highest(hours: List<HourPrice>): Double? = hours.maxOfOrNull { it.pricePerKwh }
+
+    /**
+     * Where the reservation sits on a chart that starts at [firstDay] 00:00 KST and runs [hours] hours,
+     * in hours from the chart start, clipped to the chart. Null when it falls outside the chart or
+     * the times cannot be read. Uses the server's `start_at`/`end_at` as sent.
+     */
+    fun reservationSpan(firstDay: String, startAt: String, endAt: String, hours: Int = 48): ClosedFloatingPointRange<Float>? {
+        val origin = runCatching { LocalDate.parse(firstDay).atStartOfDay(KST) }.getOrNull() ?: return null
+        val start = runCatching { ZonedDateTime.parse(startAt) }.getOrNull() ?: return null
+        val end = runCatching { ZonedDateTime.parse(endAt) }.getOrNull() ?: return null
+        fun offset(at: ZonedDateTime) = Duration.between(origin, at).toMinutes() / 60f
+        val from = offset(start).coerceIn(0f, hours.toFloat())
+        val to = offset(end).coerceIn(0f, hours.toFloat())
+        return if (to > from) from..to else null
+    }
 }

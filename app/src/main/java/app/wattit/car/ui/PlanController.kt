@@ -72,6 +72,7 @@ class PlanController(
             val capacity = reading.capacityWh
             val plan = when {
                 soc == null -> PlanState.VehicleUnavailable
+                PlanResults.alreadyCharged(soc, PlanDefaults.SOC_TARGET) -> PlanState.NotNeeded(soc, PlanDefaults.SOC_TARGET)
                 capacity == null || capacity <= 0 -> PlanState.CapacityUnknown
                 else -> PlanResults.planState(
                     planCall(

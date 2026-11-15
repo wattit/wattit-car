@@ -122,6 +122,7 @@ private fun PlanPanel(state: ScreenState, onRetry: () -> Unit, modifier: Modifie
                 plan.code?.let { "서버 오류(코드 $it)가 났어요. 잠시 후 다시 시도해 주세요." } ?: "서버 응답을 읽지 못했어요.",
                 onRetry,
             )
+            is PlanState.NotNeeded -> Notice("지금은 충전하지 않아도 돼요.", "배터리가 ${plan.socNow}%라 목표 ${plan.socTarget}% 이상이에요.", null)
             is PlanState.Ready -> ReadyPlan(plan, state)
         }
     }

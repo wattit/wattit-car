@@ -55,6 +55,43 @@ class PlanControllerTest {
     }
 
     @Test
+    fun atOrAboveTheTargetNoRequestIsSentAndNothingIsSpoken() = runTest {
+        for (soc in listOf(100, 85, 80)) {
+            val requests = mutableListOf<PlanRequest>()
+            val speaker = FakeSpeaker()
+            val controller = PlanController(
+                scope = this,
+                car = FakeCar(CarReading(socPercent = soc, capacityWh = 77400, model = null)),
+                planCall = { requests += it; HttpResult.Status(422, "") },
+                timelineCall = { _, _ -> HttpResult.Status(500, "") },
+                speaker = speaker,
+                clock = { now },
+            )
+            controller.refreshPlan()
+            advanceUntilIdle()
+            assertEquals(PlanState.NotNeeded(soc, 80), controller.state.value.plan)
+            assertTrue("soc $soc sent a request", requests.isEmpty())
+            assertTrue(speaker.said.isEmpty())
+        }
+    }
+
+    @Test
+    fun belowTheTargetTheServerIsAsked() = runTest {
+        val requests = mutableListOf<PlanRequest>()
+        val controller = PlanController(
+            scope = this,
+            car = FakeCar(CarReading(socPercent = 79, capacityWh = 77400, model = null)),
+            planCall = { requests += it; HttpResult.Ok(body) },
+            timelineCall = { _, _ -> HttpResult.Status(500, "") },
+            speaker = FakeSpeaker(),
+            clock = { now },
+        )
+        controller.refreshPlan()
+        advanceUntilIdle()
+        assertEquals(79, requests.single().socNow)
+    }
+
+    @Test
     fun zeroCapacitySendsNothing() = runTest {
         val requests = mutableListOf<PlanRequest>()
         val controller = PlanController(

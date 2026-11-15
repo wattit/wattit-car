@@ -39,14 +39,20 @@ class PlanResultsTest {
     }
 
     @Test
-    fun noChargingNeededHasNullPlanAndReservation() {
+    fun noChargingNeededFromTheServerIsNotNeeded() {
         val body = """{"needs_charging": false, "plan": null, "baseline_now": null, "savings_won": null,
-            "reservation": null, "speech": "잔량 85%가 목표 80% 이상이라 충전하지 않아도 됩니다.",
+            "reservation": null, "speech": "잔량 79.5%가 목표 79% 이상이라 충전하지 않아도 됩니다.",
             "assumptions": [], "unverified_tariff_items": []}"""
-        val state = PlanResults.planState(HttpResult.Ok(body), socNow = 85, socTarget = 80) as PlanState.Ready
-        assertFalse(state.response.needsCharging)
-        assertNull(state.response.reservation)
-        assertNull(state.response.savingsWon)
+        assertEquals(PlanState.NotNeeded(79, 80), PlanResults.planState(HttpResult.Ok(body), socNow = 79, socTarget = 80))
+    }
+
+    @Test
+    fun aBatteryAtOrAboveTheTargetSkipsTheServer() {
+        // The server accepts soc_now below 100 only; 100 would come back as a 422 validation list.
+        assertTrue(PlanResults.alreadyCharged(100, 80))
+        assertTrue(PlanResults.alreadyCharged(85, 80))
+        assertTrue(PlanResults.alreadyCharged(80, 80))
+        assertFalse(PlanResults.alreadyCharged(79, 80))
     }
 
     @Test
@@ -64,6 +70,25 @@ class PlanResultsTest {
     fun validationListOn422IsAGenericFailure() {
         val body = """{"detail":[{"type":"value_error","loc":["body","depart_at"],"msg":"x","input":"y"}]}"""
         assertEquals(PlanState.Failed(422), PlanResults.planState(HttpResult.Status(422, body), 30, 80))
+        // What the server sends for soc_now=100 (exclusive maximum).
+        val full = """{"detail":[{"type":"less_than","loc":["body","soc_now"],"msg":"Input should be less than 100",""" +
+            """"input":100,"ctx":{"lt":100.0}}]}"""
+        assertEquals(PlanState.Failed(422), PlanResults.planState(HttpResult.Status(422, full), 100, 80))
+    }
+
+    @Test
+    fun reservationSpanIsPlacedFromTheFirstChartDay() {
+        val span = TariffText.reservationSpan("2026-11-16", "2026-11-16T22:00:00+09:00", "2026-11-17T03:19:00+09:00")!!
+        assertEquals(22f, span.start, 0.001f)
+        assertEquals(27f + 19f / 60f, span.endInclusive, 0.001f)
+        // Read in KST even when sent in UTC.
+        val utc = TariffText.reservationSpan("2026-11-16", "2026-11-16T13:00:00Z", "2026-11-16T15:00:00Z")!!
+        assertEquals(22f, utc.start, 0.001f)
+        // Clipped at the chart's end, dropped when entirely outside it.
+        val late = TariffText.reservationSpan("2026-11-16", "2026-11-17T23:00:00+09:00", "2026-11-18T04:00:00+09:00")!!
+        assertEquals(48f, late.endInclusive, 0.001f)
+        assertNull(TariffText.reservationSpan("2026-11-16", "2026-11-18T01:00:00+09:00", "2026-11-18T04:00:00+09:00"))
+        assertNull(TariffText.reservationSpan("2026-11-16", "not a time", "2026-11-18T04:00:00+09:00"))
     }
 
     @Test

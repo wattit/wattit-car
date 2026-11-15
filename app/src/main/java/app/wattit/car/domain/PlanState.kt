@@ -16,6 +16,13 @@ sealed interface PlanState {
     /** The car reported battery capacity 0 or nothing: no request is sent. */
     data object CapacityUnknown : PlanState
 
+    /**
+     * The car's state of charge is at or above the target. Decided on the device without a request,
+     * because the server only accepts `soc_now` below 100 and would refuse a full battery.
+     * Also used when the server answers `needs_charging=false`.
+     */
+    data class NotNeeded(val socNow: Int, val socTarget: Int) : PlanState
+
     /** The server does not have the car plan API yet (404). */
     data object ServerNotReady : PlanState
 
@@ -28,6 +35,7 @@ sealed interface PlanState {
     /** Any other failure; [code] is the HTTP status when there was one. */
     data class Failed(val code: Int?) : PlanState
 
+    /** A charging plan to show. Always has `needs_charging=true`. */
     data class Ready(val socNow: Int, val socTarget: Int, val response: PlanResponse) : PlanState
 }
 
@@ -39,9 +47,13 @@ sealed interface TariffState {
 
 object PlanResults {
 
+    /** Whether to skip the server: the battery already holds the target. */
+    fun alreadyCharged(socNow: Int, socTarget: Int): Boolean = socNow >= socTarget
+
     fun planState(result: HttpResult, socNow: Int, socTarget: Int): PlanState = when (result) {
         is HttpResult.Ok -> try {
-            PlanState.Ready(socNow, socTarget, ApiJson.parsePlan(result.body))
+            val response = ApiJson.parsePlan(result.body)
+            if (response.needsCharging) PlanState.Ready(socNow, socTarget, response) else PlanState.NotNeeded(socNow, socTarget)
         } catch (e: SerializationException) {
             PlanState.Failed(null)
         } catch (e: IllegalArgumentException) {
